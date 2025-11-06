@@ -2,19 +2,19 @@
 
 ![UsenetStreamer logo](assets/icon.png)
 
-UsenetStreamer is a Stremio addon that bridges Prowlarr and NZBDav. It hosts no media itself; it simply orchestrates search and streaming through your existing Usenet stack. The addon searches Usenet indexers via Prowlarr, queues NZB downloads in NZBDav, and exposes the resulting media as Stremio streams.
+UsenetStreamer is a Stremio addon that bridges a Usenet indexer manager (Prowlarr or NZBHydra) and NZBDav. It hosts no media itself; it simply orchestrates search and streaming through your existing Usenet stack. The addon searches Usenet indexers through the manager, queues NZB downloads in NZBDav, and exposes the resulting media as Stremio streams.
 
 ## Features
 
 - ID-aware search plans (IMDb/TMDB/TVDB) with automatic metadata enrichment.
-- Parallel Prowlarr queries with deduplicated NZB aggregation.
+- Parallel Prowlarr/NZBHydra queries with deduplicated NZB aggregation.
 - Direct WebDAV streaming from NZBDav (no local mounts required).
 - Configurable via environment variables (see `.env.example`).
 - Fallback failure clip when NZBDav cannot deliver media.
 
 ## Getting Started
 
-1. Copy `.env.example` to `.env` and fill in your Prowlarr/NZBDav credentials and addon base URL.
+1. Copy `.env.example` to `.env` and fill in your indexer manager (Prowlarr or NZBHydra), NZBDav credentials, and addon base URL.
 2. Install dependencies:
 
    ```bash
@@ -37,8 +37,10 @@ docker pull ghcr.io/sanket9225/usenetstreamer:latest
 docker run -d \
    --name usenetstreamer \
    -p 7000:7000 \
-   -e PROWLARR_URL=https://your-prowlarr-host:9696 \
-   -e PROWLARR_API_KEY=your-prowlarr-api-key \
+   -e INDEXER_MANAGER=prowlarr \
+   -e INDEXER_MANAGER_URL=https://your-prowlarr-host:9696 \
+   -e INDEXER_MANAGER_API_KEY=your-prowlarr-api-key \
+   -e INDEXER_MANAGER_INDEXERS=-1 \
    -e NZBDAV_URL=http://localhost:3000 \
    -e NZBDAV_API_KEY=your-nzbdav-api-key \
    -e NZBDAV_WEBDAV_URL=http://localhost:3000 \
@@ -52,16 +54,22 @@ If you prefer to keep secrets in a file, use `--env-file /path/to/usenetstreamer
 
 > Need a custom build? Clone this repo, adjust the code, then run `docker build -t usenetstreamer .` to create your own image.
 
+Using NZBHydra instead? Set `INDEXER_MANAGER=nzbhydra`, point `INDEXER_MANAGER_URL` at your Hydra instance, and provide comma-separated indexer names via `INDEXER_MANAGER_INDEXERS` if you want to limit the search scope. Leave `INDEXER_MANAGER_INDEXERS` blank to let Hydra decide.
+
 
 ## Environment Variables
 
-- `PROWLARR_URL`, `PROWLARR_API_KEY`, `PROWLARR_STRICT_ID_MATCH`, `PROWLARR_INDEXER_IDS`
+- `INDEXER_MANAGER`, `INDEXER_MANAGER_URL`, `INDEXER_MANAGER_API_KEY`, `INDEXER_MANAGER_STRICT_ID_MATCH`, `INDEXER_MANAGER_INDEXERS`
 - `NZBDAV_URL`, `NZBDAV_API_KEY`, `NZBDAV_WEBDAV_URL`, `NZBDAV_WEBDAV_USER`, `NZBDAV_WEBDAV_PASS`
 - `ADDON_BASE_URL`
 
-`PROWLARR_STRICT_ID_MATCH` defaults to `false`. Set it to `true` if you want strictly ID-based searches (IMDb/TVDB/TMDB only). This usually yields faster, more precise matches but many indexers do not support ID queries, so you will receive fewer total results.
+`INDEXER_MANAGER` defaults to `prowlarr`. Set it to `nzbhydra` to target an NZBHydra instance.
 
-`PROWLARR_INDEXER_IDS` accepts a comma-separated list (e.g. `1,3,9`). Leave it empty or use `-1` for “all Usenet indexers,” mirroring Prowlarr’s special ID handling. The addon will log which IDs are used for each request.
+`INDEXER_MANAGER_STRICT_ID_MATCH` defaults to `false`. Set it to `true` if you want strictly ID-based searches (IMDb/TVDB/TMDB only). This usually yields faster, more precise matches but many indexers do not support ID queries, so you will receive fewer total results.
+
+`INDEXER_MANAGER_INDEXERS` accepts a comma-separated list. For Prowlarr, use indexer IDs (e.g. `1,3,9`; `-1` means “all Usenet indexers”). For NZBHydra, provide the indexer names as displayed in its UI. The addon logs the effective value on each request.
+
+`INDEXER_MANAGER_CACHE_MINUTES` (optional) overrides the default NZBHydra cache duration (10 minutes). Leave unset to keep the default. Prowlarr ignores this value.
 
 See `.env.example` for the authoritative list.
 

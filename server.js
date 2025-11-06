@@ -15,19 +15,29 @@ const port = Number(process.env.PORT || 7000);
 app.use(cors());
 app.use('/assets', express.static(path.join(__dirname, 'assets')));
 
-// Configure Prowlarr
-const PROWLARR_URL = (process.env.PROWLARR_URL || '').trim();
-const PROWLARR_API_KEY = (process.env.PROWLARR_API_KEY || '').trim();
-const PROWLARR_STRICT_ID_MATCH = (process.env.PROWLARR_STRICT_ID_MATCH || 'false').toLowerCase() === 'true';
-const PROWLARR_INDEXER_IDS = (() => {
-  const raw = (process.env.PROWLARR_INDEXER_IDS || '').trim();
-  if (!raw) return '-1';
-  return raw
+// Configure indexer manager (Prowlarr or NZBHydra)
+const INDEXER_MANAGER = (process.env.INDEXER_MANAGER || 'prowlarr').trim().toLowerCase();
+const INDEXER_MANAGER_URL = (process.env.INDEXER_MANAGER_URL || process.env.PROWLARR_URL || '').trim();
+const INDEXER_MANAGER_API_KEY = (process.env.INDEXER_MANAGER_API_KEY || process.env.PROWLARR_API_KEY || '').trim();
+const INDEXER_MANAGER_STRICT_ID_MATCH = (process.env.INDEXER_MANAGER_STRICT_ID_MATCH || process.env.PROWLARR_STRICT_ID_MATCH || 'false').toLowerCase() === 'true';
+const INDEXER_MANAGER_INDEXERS = (() => {
+  const fallback = INDEXER_MANAGER === 'nzbhydra' ? '' : '-1';
+  const raw = (process.env.INDEXER_MANAGER_INDEXERS || process.env.PROWLARR_INDEXER_IDS || '').trim();
+  if (!raw) return fallback;
+  const joined = raw
     .split(',')
     .map((id) => id.trim())
     .filter((id) => id.length > 0)
-    .join(',') || '-1';
+    .join(',');
+  return joined || fallback;
 })();
+const INDEXER_MANAGER_LABEL = INDEXER_MANAGER === 'nzbhydra' ? 'NZBHydra' : 'Prowlarr';
+const INDEXER_LOG_PREFIX = `[${INDEXER_MANAGER_LABEL.toUpperCase()}]`;
+const INDEXER_MANAGER_CACHE_MINUTES = (() => {
+  const raw = Number(process.env.INDEXER_MANAGER_CACHE_MINUTES);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 10;
+})();
+const INDEXER_MANAGER_BASE_URL = INDEXER_MANAGER_URL.replace(/\/+$/, '');
 
 // Configure NZBDav
 const ADDON_BASE_URL = (process.env.ADDON_BASE_URL || '').trim();
@@ -89,12 +99,12 @@ function ensureNzbdavConfigured() {
   }
 }
 
-function ensureProwlarrConfigured() {
-  if (!PROWLARR_URL) {
-    throw new Error('PROWLARR_URL is not configured');
+function ensureIndexerManagerConfigured() {
+  if (!INDEXER_MANAGER_URL) {
+    throw new Error('INDEXER_MANAGER_URL is not configured');
   }
-  if (!PROWLARR_API_KEY) {
-    throw new Error('PROWLARR_API_KEY is not configured');
+  if (!INDEXER_MANAGER_API_KEY) {
+    throw new Error('INDEXER_MANAGER_API_KEY is not configured');
   }
 }
 
@@ -102,6 +112,212 @@ function ensureAddonConfigured() {
   if (!ADDON_BASE_URL) {
     throw new Error('ADDON_BASE_URL is not configured');
   }
+}
+
+const isUsingProwlarr = () => INDEXER_MANAGER === 'prowlarr';
+const isUsingNzbhydra = () => INDEXER_MANAGER === 'nzbhydra';
+
+function buildProwlarrSearchParams(plan) {
+  return {
+    limit: '25',
+    offset: '0',
+    type: plan.type,
+    query: plan.query,
+    indexerIds: INDEXER_MANAGER_INDEXERS || undefined
+  };
+}
+
+async function executeProwlarrSearch(plan) {
+  const params = buildProwlarrSearchParams(plan);
+  const response = await axios.get(`${INDEXER_MANAGER_BASE_URL}/api/v1/search`, {
+    params,
+    headers: { 'X-Api-Key': INDEXER_MANAGER_API_KEY },
+    timeout: 60000
+  });
+  return Array.isArray(response.data) ? response.data : [];
+}
+
+function mapHydraSearchType(planType) {
+  if (planType === 'tvsearch' || planType === 'movie' || planType === 'search' || planType === 'book') {
+    return planType;
+  }
+  return 'search';
+}
+
+function applyTokenToHydraParams(token, params) {
+  const match = token.match(/^\{([^:]+):(.*)\}$/);
+  if (!match) {
+    return;
+  }
+  const key = match[1].trim().toLowerCase();
+  const rawValue = match[2].trim();
+
+  switch (key) {
+    case 'imdbid': {
+      const value = rawValue.replace(/^tt/i, '');
+      if (value) params.imdbid = value;
+      break;
+    }
+    case 'tmdbid':
+      if (rawValue) params.tmdbid = rawValue;
+      break;
+    case 'tvdbid':
+      if (rawValue) params.tvdbid = rawValue;
+      break;
+    case 'season':
+      if (rawValue) params.season = rawValue;
+      break;
+    case 'episode':
+      if (rawValue) params.ep = rawValue;
+      break;
+    default:
+      break;
+  }
+}
+
+function buildHydraSearchParams(plan) {
+  const params = {
+    apikey: INDEXER_MANAGER_API_KEY,
+    t: mapHydraSearchType(plan.type),
+    o: 'json'
+  };
+
+  if (INDEXER_MANAGER_INDEXERS) {
+    params.indexers = INDEXER_MANAGER_INDEXERS;
+  }
+
+  if (INDEXER_MANAGER_CACHE_MINUTES > 0) {
+    params.cachetime = String(INDEXER_MANAGER_CACHE_MINUTES);
+  }
+
+  if (Array.isArray(plan.tokens)) {
+    plan.tokens.forEach((token) => applyTokenToHydraParams(token, params));
+  }
+
+  if (plan.rawQuery) {
+    params.q = plan.rawQuery;
+  } else if ((!plan.tokens || plan.tokens.length === 0) && plan.query) {
+    params.q = plan.query;
+  }
+
+  return params;
+}
+
+function extractHydraAttrMap(item) {
+  const attrMap = {};
+  const attrSources = [];
+
+  const collectSource = (source) => {
+    if (!source) return;
+    if (Array.isArray(source)) {
+      source.forEach((entry) => attrSources.push(entry));
+    } else {
+      attrSources.push(source);
+    }
+  };
+
+  collectSource(item.attr);
+  collectSource(item.attrs);
+  collectSource(item.attributes);
+  collectSource(item['newznab:attr']);
+
+  attrSources.forEach((attr) => {
+    if (!attr) return;
+    const name = (attr.name || attr['@name'] || attr['$']?.name || attr.key || attr['@key'] || '')
+      .toString()
+      .trim()
+      .toLowerCase();
+    if (!name) return;
+    const value = attr.value || attr['@value'] || attr['$']?.value || attr.content || attr['#text'];
+    if (value !== undefined && value !== null) {
+      attrMap[name] = value;
+    }
+  });
+
+  return attrMap;
+}
+
+function normalizeHydraResults(data) {
+  if (!data) return [];
+
+  const resolveItems = (payload) => {
+    if (!payload) return [];
+    if (Array.isArray(payload)) return payload;
+    if (payload.item) return resolveItems(payload.item);
+    return [payload];
+  };
+
+  const channel = data.channel || data.rss?.channel || data['rss']?.channel;
+  const items = resolveItems(channel || data.item || []);
+
+  const results = [];
+
+  for (const item of items) {
+    if (!item) continue;
+    const title = item.title || item['title'] || null;
+
+    let downloadUrl = null;
+    const enclosure = item.enclosure || item['enclosure'];
+    if (enclosure) {
+      const enclosureObj = Array.isArray(enclosure) ? enclosure[0] : enclosure;
+      downloadUrl = enclosureObj?.url || enclosureObj?.['@url'] || enclosureObj?.href;
+    }
+    if (!downloadUrl) {
+      downloadUrl = item.link || item['link'];
+    }
+    if (!downloadUrl) {
+      const guid = item.guid || item['guid'];
+      if (typeof guid === 'string') {
+        downloadUrl = guid;
+      } else if (guid && typeof guid === 'object') {
+        downloadUrl = guid._ || guid['#text'] || guid.url || guid.href;
+      }
+    }
+    if (!downloadUrl) {
+      continue;
+    }
+
+    const attrMap = extractHydraAttrMap(item);
+    const sizeValue = attrMap.size || attrMap.filesize || attrMap['contentlength'] || attrMap['nzbsize'];
+    const parsedSize = sizeValue !== undefined ? Number.parseInt(sizeValue, 10) : NaN;
+    const indexer = attrMap.indexer || attrMap.indexername || item.indexer || item['indexer'];
+    const indexerId = attrMap.indexerid || indexer || 'nzbhydra';
+
+    const guidRaw = item.guid || item['guid'];
+    let guidValue = null;
+    if (typeof guidRaw === 'string') {
+      guidValue = guidRaw;
+    } else if (guidRaw && typeof guidRaw === 'object') {
+      guidValue = guidRaw._ || guidRaw['#text'] || guidRaw.url || guidRaw.href || null;
+    }
+
+    results.push({
+      title: title || downloadUrl,
+      downloadUrl,
+      guid: guidValue,
+      size: Number.isFinite(parsedSize) ? parsedSize : undefined,
+      indexer,
+      indexerId
+    });
+  }
+
+  return results;
+}
+
+async function executeNzbhydraSearch(plan) {
+  const params = buildHydraSearchParams(plan);
+  const response = await axios.get(`${INDEXER_MANAGER_BASE_URL}/api`, {
+    params,
+    timeout: 60000
+  });
+  return normalizeHydraResults(response.data);
+}
+
+function executeIndexerPlan(plan) {
+  if (isUsingNzbhydra()) {
+    return executeNzbhydraSearch(plan);
+  }
+  return executeProwlarrSearch(plan);
 }
 
 function getNzbdavCategory(type) {
@@ -728,7 +944,7 @@ app.get('/manifest.json', (req, res) => {
   id: 'com.usenet.streamer',
   version: '1.0.0',
   name: 'UsenetStreamer',
-  description: 'Usenet-powered instant streams for Stremio via Prowlarr and NZBDav',
+  description: 'Usenet-powered instant streams for Stremio via Prowlarr/NZBHydra and NZBDav',
   logo: `${ADDON_BASE_URL.replace(/\/$/, '')}/assets/icon.png`,
     resources: ['stream'],
     types: ['movie', 'series', 'channel', 'tv'],
@@ -743,13 +959,13 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 
   const primaryId = id.split(':')[0];
   if (!/^tt\d+$/.test(primaryId)) {
-    res.status(400).json({ error: `Unsupported ID prefix for Prowlarr ID search: ${primaryId}` });
+  res.status(400).json({ error: `Unsupported ID prefix for indexer manager search: ${primaryId}` });
     return;
   }
 
   try {
   ensureAddonConfigured();
-  ensureProwlarrConfigured();
+  ensureIndexerManagerConfigured();
     ensureNzbdavConfigured();
 
     const pickFirstDefined = (...values) => values.find((value) => value !== undefined && value !== null && String(value).trim() !== '') || null;
@@ -945,15 +1161,13 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     const searchPlans = [];
     const seenPlans = new Set();
     const addPlan = (planType, { tokens = [], rawQuery = null } = {}) => {
-      let query = rawQuery;
-      if (!query) {
-        const tokenList = [...tokens];
-        if (planType === 'tvsearch') {
-          if (seasonToken) tokenList.push(seasonToken);
-          if (episodeToken) tokenList.push(episodeToken);
-        }
-        query = tokenList.filter(Boolean).join(' ');
+      const tokenList = [...tokens];
+      if (planType === 'tvsearch') {
+        if (seasonToken) tokenList.push(seasonToken);
+        if (episodeToken) tokenList.push(episodeToken);
       }
+      const normalizedTokens = tokenList.filter(Boolean);
+      const query = rawQuery ? rawQuery : normalizedTokens.join(' ');
       if (!query) {
         return false;
       }
@@ -962,7 +1176,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         return false;
       }
       seenPlans.add(planKey);
-      searchPlans.push({ type: planType, query });
+      searchPlans.push({ type: planType, query, rawQuery: rawQuery ? rawQuery : null, tokens: normalizedTokens });
       return true;
     };
 
@@ -993,24 +1207,23 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     }
 
     // Only add text-based search if strict ID matching is disabled
-    if (!PROWLARR_STRICT_ID_MATCH) {
+    if (!INDEXER_MANAGER_STRICT_ID_MATCH) {
       const textQueryFallback = (textQueryParts.join(' ').trim() || primaryId).trim();
       const addedTextPlan = addPlan('search', { rawQuery: textQueryFallback });
       if (addedTextPlan) {
-        console.log('[PROWLARR] Added text search plan', { query: textQueryFallback });
+        console.log(`${INDEXER_LOG_PREFIX} Added text search plan`, { query: textQueryFallback });
       } else {
-        console.log('[PROWLARR] Text search plan already present', { query: textQueryFallback });
+        console.log(`${INDEXER_LOG_PREFIX} Text search plan already present`, { query: textQueryFallback });
       }
     } else {
-      console.log('[PROWLARR] Strict ID matching enabled; skipping text-based search');
+      console.log(`${INDEXER_LOG_PREFIX} Strict ID matching enabled; skipping text-based search`);
     }
 
-    const baseSearchParams = {
-      limit: '25',
-      offset: '0',
-      indexerIds: PROWLARR_INDEXER_IDS
-    };
-    console.log('[PROWLARR] Using indexerIds', PROWLARR_INDEXER_IDS);
+    if (INDEXER_MANAGER_INDEXERS) {
+      console.log(`${INDEXER_LOG_PREFIX} Using configured indexers`, INDEXER_MANAGER_INDEXERS);
+    } else {
+      console.log(`${INDEXER_LOG_PREFIX} Using manager default indexer selection`);
+    }
 
     const deriveResultKey = (result) => {
       if (!result) return null;
@@ -1023,20 +1236,15 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       return `${indexerId}|${indexer}|${title}|${size}`;
     };
 
-  const usingStrictIdMatching = PROWLARR_STRICT_ID_MATCH;
-  const resultsByKey = usingStrictIdMatching ? null : new Map();
-  const aggregatedResults = usingStrictIdMatching ? [] : null;
+    const usingStrictIdMatching = INDEXER_MANAGER_STRICT_ID_MATCH;
+    const resultsByKey = usingStrictIdMatching ? null : new Map();
+    const aggregatedResults = usingStrictIdMatching ? [] : null;
     const planSummaries = [];
 
     const planExecutions = searchPlans.map((plan) => {
-      console.log('[PROWLARR] Dispatching plan', plan);
-      return axios
-        .get(`${PROWLARR_URL}/api/v1/search`, {
-          params: { ...baseSearchParams, type: plan.type, query: plan.query },
-          headers: { 'X-Api-Key': PROWLARR_API_KEY },
-          timeout: 60000
-        })
-        .then((response) => ({ plan, status: 'fulfilled', data: response.data }))
+      console.log(`${INDEXER_LOG_PREFIX} Dispatching plan`, plan);
+      return executeIndexerPlan(plan)
+        .then((data) => ({ plan, status: 'fulfilled', data }))
         .catch((error) => ({ plan, status: 'rejected', error }));
     });
 
@@ -1045,7 +1253,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     for (const result of planResultsSettled) {
       const { plan } = result;
       if (result.status === 'rejected') {
-        console.error('[PROWLARR] ❌ Search plan failed', {
+        console.error(`${INDEXER_LOG_PREFIX} ❌ Search plan failed`, {
           message: result.error.message,
           type: plan.type,
           query: plan.query
@@ -1062,7 +1270,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       }
 
       const planResults = Array.isArray(result.data) ? result.data : [];
-      console.log(`[PROWLARR] ✅ ${plan.type} returned ${planResults.length} total results for query "${plan.query}"`);
+  console.log(`${INDEXER_LOG_PREFIX} ✅ ${plan.type} returned ${planResults.length} total results for query "${plan.query}"`);
 
       const filteredResults = planResults.filter((item) => {
         if (!item || typeof item !== 'object') {
@@ -1097,19 +1305,19 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         filtered: filteredResults.length,
         uniqueAdded: addedCount
       });
-      console.log('[PROWLARR] ✅ Plan summary', planSummaries[planSummaries.length - 1]);
+      console.log(`${INDEXER_LOG_PREFIX} ✅ Plan summary`, planSummaries[planSummaries.length - 1]);
     }
 
     const aggregationCount = usingStrictIdMatching ? aggregatedResults.length : resultsByKey.size;
     if (aggregationCount === 0) {
-      console.warn(`[PROWLARR] ⚠ All ${searchPlans.length} search plans returned no NZB results`);
+      console.warn(`${INDEXER_LOG_PREFIX} ⚠ All ${searchPlans.length} search plans returned no NZB results`);
     } else if (usingStrictIdMatching) {
-      console.log('[PROWLARR] ✅ Aggregated NZB results with strict ID matching', {
+      console.log(`${INDEXER_LOG_PREFIX} ✅ Aggregated NZB results with strict ID matching`, {
         plansRun: searchPlans.length,
         totalResults: aggregationCount
       });
     } else {
-      console.log('[PROWLARR] ✅ Aggregated unique NZB results', {
+      console.log(`${INDEXER_LOG_PREFIX} ✅ Aggregated unique NZB results`, {
         plansRun: searchPlans.length,
         uniqueResults: aggregationCount
       });
@@ -1122,7 +1330,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     const finalNzbResults = dedupedNzbResults
       .filter((result, index) => {
         if (!result.downloadUrl || !result.indexerId) {
-          console.warn(`[PROWLARR] Skipping NZB result ${index} missing required fields`, {
+          console.warn(`${INDEXER_LOG_PREFIX} Skipping NZB result ${index} missing required fields`, {
             hasDownloadUrl: !!result.downloadUrl,
             hasIndexerId: !!result.indexerId,
             title: result.title
@@ -1133,7 +1341,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       })
       .map((result) => ({ ...result, _sourceType: 'nzb' }));
 
-    console.log(`[PROWLARR] Final NZB selection: ${finalNzbResults.length} results`);
+  console.log(`${INDEXER_LOG_PREFIX} Final NZB selection: ${finalNzbResults.length} results`);
 
     const addonBaseUrl = ADDON_BASE_URL.replace(/\/$/, '');
 
@@ -1194,7 +1402,8 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       details: {
         type,
         id,
-        prowlarrUrl: PROWLARR_URL,
+        indexerManager: INDEXER_MANAGER_LABEL,
+        indexerManagerUrl: INDEXER_MANAGER_URL,
         timestamp: new Date().toISOString()
       }
     });
