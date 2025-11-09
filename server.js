@@ -1609,22 +1609,32 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
     res.setHeader('Accept-Ranges', 'bytes');
   }
 
-  let contentLengthHeader = res.getHeader('Content-Length');
-  if ((!contentLengthHeader || Number(contentLengthHeader) === 0) && incomingContentRange) {
-    const match = incomingContentRange.match(/bytes\s+(\d+)-(\d+)\/(\d+|\*)/i);
+  const contentLengthHeader = res.getHeader('Content-Length');
+  if (incomingContentRange) {
+    const match = incomingContentRange.match(/bytes\s+(\d+)-(\d+)\s*\/\s*(\d+|\*)/i);
     if (match) {
       const start = Number(match[1]);
       const end = Number(match[2]);
+      const totalSize = match[3] !== '*' ? Number(match[3]) : null;
       const chunkLength = Number.isFinite(start) && Number.isFinite(end) ? end - start + 1 : null;
-      if (Number.isFinite(chunkLength)) {
+      console.log('[NZBDAV] Calculated chunk length:', { start, end, chunkLength, totalSize });
+      if (Number.isFinite(chunkLength) && chunkLength > 0) {
         res.setHeader('Content-Length', String(chunkLength));
+        console.log(`[NZBDAV] ✅ Set Content-Length: ${chunkLength} (from Content-Range: bytes ${start}-${end}/${totalSize || '*'})`);
+      } else {
+        console.error('[NZBDAV] ❌ Failed to calculate valid chunk length!');
       }
-      if (match[3] && match[3] !== '*' && !res.getHeader('X-Total-Length')) {
-        res.setHeader('X-Total-Length', match[3]);
+      if (Number.isFinite(totalSize)) {
+        res.setHeader('X-Total-Length', String(totalSize));
       }
+    } else {
+      console.error('[NZBDAV] ❌ Failed to parse Content-Range header!');
     }
   } else if ((!contentLengthHeader || Number(contentLengthHeader) === 0) && Number.isFinite(totalFileSize)) {
     res.setHeader('Content-Length', String(totalFileSize));
+    console.log(`[NZBDAV] Set Content-Length: ${totalFileSize} (from HEAD request)`);
+  } else if (!contentLengthHeader || Number(contentLengthHeader) === 0) {
+    console.warn('[NZBDAV] Warning: No Content-Length or Content-Range header available');
   }
 
   res.setHeader('Access-Control-Allow-Origin', '*');
