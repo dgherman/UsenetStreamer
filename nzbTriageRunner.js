@@ -88,57 +88,6 @@ function rankCandidates(candidates, preferredSizeBytes, preferredIndexerSet) {
   return prioritized.concat(fallback);
 }
 
-async function downloadNzbs(candidates, options, logger, startTs) {
-  const timeBudgetMs = options.timeBudgetMs ?? DEFAULT_TIME_BUDGET_MS;
-  const concurrency = Math.max(1, Math.min(options.downloadConcurrency ?? DEFAULT_DOWNLOAD_CONCURRENCY, candidates.length));
-  const timeoutMs = options.downloadTimeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS;
-  const payloads = [];
-  const failures = new Map();
-  let timedOut = false;
-  let cursor = 0;
-
-  const worker = async () => {
-    while (true) {
-      const index = cursor;
-      if (index >= candidates.length) return;
-      cursor += 1;
-
-      if (Date.now() - startTs > timeBudgetMs) {
-        timedOut = true;
-        return;
-      }
-
-      const candidate = candidates[index];
-      try {
-        const response = await axios.get(candidate.downloadUrl, {
-          responseType: 'text',
-          timeout: timeoutMs,
-          headers: {
-            Accept: 'application/x-nzb,text/xml;q=0.9,*/*;q=0.8',
-            'User-Agent': 'UsenetStreamer-Triage',
-          },
-          transitional: { silentJSONParsing: true, forcedJSONParsing: false },
-        });
-        if (typeof response.data !== 'string' || response.data.length === 0) {
-          throw new Error('Empty NZB payload');
-        }
-        payloads.push({ candidate, nzb: response.data });
-      } catch (err) {
-        failures.set(candidate.downloadUrl, err);
-        logEvent(logger, 'warn', 'Failed to download NZB for triage', {
-          downloadUrl: candidate.downloadUrl,
-          message: err?.message,
-        });
-      }
-    }
-  };
-
-  const workers = Array.from({ length: concurrency }, () => worker());
-  await Promise.all(workers);
-
-  return { payloads, failures, timedOut };
-}
-
 function withTimeout(promise, timeoutMs) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
   let timer = null;
@@ -221,15 +170,6 @@ async function triageAndRank(nzbResults, options = {}) {
     candidateByUrl.set(candidate.downloadUrl, candidate);
   });
 
-  const downloadResult = await downloadNzbs(selectedCandidates, {
-    timeBudgetMs,
-    downloadConcurrency: options.downloadConcurrency,
-    downloadTimeoutMs: options.downloadTimeoutMs,
-  }, logger, startTs);
-
-  const elapsedAfterDownloads = Date.now() - startTs;
-  let timedOut = downloadResult.timedOut;
-  const remainingBudget = timeBudgetMs - elapsedAfterDownloads;
   const decisionMap = new Map();
 
   const attachMetadata = (url, decision) => {
@@ -245,89 +185,125 @@ async function triageAndRank(nzbResults, options = {}) {
     }
     return decision;
   };
+  const downloadConcurrency = Math.max(
+    1,
+    Math.min(options.downloadConcurrency ?? DEFAULT_DOWNLOAD_CONCURRENCY, selectedCandidates.length),
+  );
+  const downloadTimeoutMs = options.downloadTimeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS;
+  const triageConfig = { ...triageOptions, reuseNntpPool: true };
 
-  for (const [url, err] of downloadResult.failures.entries()) {
-    decisionMap.set(url, attachMetadata(url, {
-      status: 'fetch-error',
-      error: err?.message || 'Failed to fetch NZB payload',
-      blockers: ['fetch-error'],
-      warnings: [],
-      archiveFindings: [],
-      nzbIndex: null,
-      fileCount: null,
-    }));
-  }
+  let cursor = 0;
+  let timedOut = false;
+  let evaluatedCount = 0;
+  let fetchFailures = 0;
 
-  if (downloadResult.payloads.length === 0) {
-    selectedCandidates.forEach((candidate) => {
-      if (!decisionMap.has(candidate.downloadUrl)) {
-        decisionMap.set(candidate.downloadUrl, attachMetadata(candidate.downloadUrl, {
-          status: timedOut ? 'pending' : 'skipped',
-          blockers: [],
+  const makeTimeoutDecision = (url) => attachMetadata(url, {
+    status: 'error',
+    blockers: ['triage-error'],
+    warnings: ['Triage timed out'],
+    archiveFindings: [],
+    nzbIndex: null,
+    fileCount: null,
+  });
+
+  const workers = Array.from({ length: downloadConcurrency }, async () => {
+    while (true) {
+      if (timedOut) return;
+      const index = cursor;
+      if (index >= selectedCandidates.length) return;
+      cursor += 1;
+
+      const candidate = selectedCandidates[index];
+      const { downloadUrl } = candidate;
+
+      if (decisionMap.has(downloadUrl)) continue;
+
+      if (Date.now() - startTs >= timeBudgetMs) {
+        timedOut = true;
+        decisionMap.set(downloadUrl, makeTimeoutDecision(downloadUrl));
+        continue;
+      }
+
+      let nzbPayload;
+      try {
+        const response = await axios.get(downloadUrl, {
+          responseType: 'text',
+          timeout: downloadTimeoutMs,
+          headers: {
+            Accept: 'application/x-nzb,text/xml;q=0.9,*/*;q=0.8',
+            'User-Agent': 'UsenetStreamer-Triage',
+          },
+          transitional: { silentJSONParsing: true, forcedJSONParsing: false },
+        });
+        if (typeof response.data !== 'string' || response.data.length === 0) {
+          throw new Error('Empty NZB payload');
+        }
+        nzbPayload = response.data;
+      } catch (err) {
+        fetchFailures += 1;
+        decisionMap.set(downloadUrl, attachMetadata(downloadUrl, {
+          status: 'fetch-error',
+          error: err?.message || 'Failed to fetch NZB payload',
+          blockers: ['fetch-error'],
           warnings: [],
           archiveFindings: [],
           nzbIndex: null,
           fileCount: null,
         }));
+        logEvent(logger, 'warn', 'Failed to download NZB for triage', {
+          downloadUrl,
+          message: err?.message,
+        });
+        continue;
       }
-    });
 
-    return {
-      decisions: decisionMap,
-      elapsedMs: Date.now() - startTs,
-      timedOut,
-      candidatesConsidered: selectedCandidates.length,
-      evaluatedCount: 0,
-      fetchFailures: downloadResult.failures.size,
-      summary: null,
-    };
-  }
+      const triageTask = async () => {
+        const remaining = timeBudgetMs - (Date.now() - startTs);
+        if (remaining <= 0) {
+          const timeoutError = new Error('Triage timed out');
+          timeoutError.code = TIMEOUT_ERROR_CODE;
+          throw timeoutError;
+        }
+        return withTimeout(triageNzbs([nzbPayload], triageConfig), remaining);
+      };
 
-  const effectiveParallelNzbs = Math.min(
-    downloadResult.payloads.length,
-    Math.max(1, triageOptions.maxParallelNzbs ?? downloadResult.payloads.length)
-  );
-  triageOptions.maxParallelNzbs = effectiveParallelNzbs;
-  triageOptions.reuseNntpPool = true;
-
-  let summary = null;
-  let triageError = null;
-  if (remainingBudget > 0) {
-    try {
-      const nzbPayloads = downloadResult.payloads.map((entry) => entry.nzb);
-      summary = await withTimeout(triageNzbs(nzbPayloads, triageOptions), remainingBudget);
-    } catch (err) {
-      triageError = err;
-      if (err?.code === TIMEOUT_ERROR_CODE) timedOut = true;
-      logEvent(logger, 'warn', 'NZB triage failed', { message: err?.message });
+      try {
+        const summary = await triageTask();
+        const firstDecision = summary?.decisions?.[0];
+        if (firstDecision) {
+          const summarized = summarizeDecision(firstDecision);
+          decisionMap.set(downloadUrl, attachMetadata(downloadUrl, summarized));
+          evaluatedCount += 1;
+        } else {
+          decisionMap.set(downloadUrl, attachMetadata(downloadUrl, {
+            status: 'error',
+            blockers: ['triage-error'],
+            warnings: ['No decision returned'],
+            archiveFindings: [],
+            nzbIndex: null,
+            fileCount: null,
+          }));
+        }
+      } catch (err) {
+        if (err?.code === TIMEOUT_ERROR_CODE) {
+          timedOut = true;
+          decisionMap.set(downloadUrl, makeTimeoutDecision(downloadUrl));
+        } else {
+          decisionMap.set(downloadUrl, attachMetadata(downloadUrl, {
+            status: 'error',
+            blockers: ['triage-error'],
+            warnings: err?.message ? [err.message] : [],
+            archiveFindings: [],
+            nzbIndex: null,
+            fileCount: null,
+          }));
+        }
+        logEvent(logger, 'warn', 'NZB triage failed', { message: err?.message });
+      }
     }
-  } else {
-    timedOut = true;
-  }
+  });
 
-  if (summary?.decisions?.length) {
-    summary.decisions.forEach((decision, index) => {
-      const payloadRef = downloadResult.payloads[index];
-      if (!payloadRef) return;
-      const summarized = summarizeDecision(decision);
-      decisionMap.set(payloadRef.candidate.downloadUrl, attachMetadata(payloadRef.candidate.downloadUrl, summarized));
-    });
-  }
-
-  if (triageError && summary === null) {
-    downloadResult.payloads.forEach((entry) => {
-      if (!decisionMap.has(entry.candidate.downloadUrl)) {
-        decisionMap.set(entry.candidate.downloadUrl, attachMetadata(entry.candidate.downloadUrl, {
-          status: 'error',
-          blockers: ['triage-error'],
-          warnings: triageError?.message ? [triageError.message] : [],
-          archiveFindings: [],
-          nzbIndex: null,
-          fileCount: null,
-        }));
-      }
-    });
-  }
+  await Promise.all(workers);
 
   selectedCandidates.forEach((candidate) => {
     if (!decisionMap.has(candidate.downloadUrl)) {
@@ -347,9 +323,9 @@ async function triageAndRank(nzbResults, options = {}) {
     elapsedMs: Date.now() - startTs,
     timedOut,
     candidatesConsidered: selectedCandidates.length,
-    evaluatedCount: summary?.decisions?.length ?? 0,
-    fetchFailures: downloadResult.failures.size,
-    summary,
+    evaluatedCount,
+    fetchFailures,
+    summary: null,
   };
 }
 

@@ -54,7 +54,7 @@ docker run -d --restart unless-stopped \
    ghcr.io/sanket9225/usenetstreamer:dev
 ```
 
-That launches the current development build, exposes the addon on port `7000`, and locks the manifest behind `/super-secret-token/…`. Add additional `-e` flags (or switch to `--env-file`) to provide your indexer, NZBDav, and NNTP credentials. Substitute the `:dev` tag with a specific version once you’re ready for production.
+That launches the current development build, exposes the addon on port `7000`, and locks the manifest behind `/super-secret-token/…`. Add additional `-e` flags (or switch to `--env-file`) to provide your indexer, NZBDav, and NNTP credentials.
 
 Need a custom image? Clone this repo, adjust the code, then run `docker build -t usenetstreamer .`.
 
