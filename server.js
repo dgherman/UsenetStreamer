@@ -15,6 +15,7 @@ const {
   testUsenetConnection,
 } = require('./connectionTests');
 const { triageAndRank } = require('./nzbTriageRunner');
+const { preWarmNntpPool } = require('./nzbTriage');
 
 runtimeEnv.applyRuntimeEnv();
 
@@ -283,6 +284,8 @@ const TRIAGE_PREFERRED_SIZE_BYTES = Number.isFinite(TRIAGE_PREFERRED_SIZE_GB) &&
   ? TRIAGE_PREFERRED_SIZE_GB * 1024 * 1024 * 1024
   : null;
 const TRIAGE_PRIORITY_INDEXERS = parseCommaList(process.env.NZB_TRIAGE_PRIORITY_INDEXERS);
+const TRIAGE_HEALTH_INDEXERS = parseCommaList(process.env.NZB_TRIAGE_HEALTH_INDEXERS);
+const TRIAGE_SERIALIZED_INDEXERS = parseCommaList(process.env.NZB_TRIAGE_SERIALIZED_INDEXERS);
 const TRIAGE_ARCHIVE_DIRS = parsePathList(process.env.NZB_TRIAGE_ARCHIVE_DIRS);
 const TRIAGE_NNTP_CONFIG = buildTriageNntpConfig();
 const TRIAGE_MAX_DECODED_BYTES = toPositiveInt(process.env.NZB_TRIAGE_MAX_DECODED_BYTES, 32 * 1024);
@@ -305,6 +308,21 @@ const TRIAGE_BASE_OPTIONS = {
   healthCheckTimeoutMs: TRIAGE_TIME_BUDGET_MS,
 };
 
+if (TRIAGE_REUSE_POOL && TRIAGE_NNTP_CONFIG) {
+  preWarmNntpPool({
+    nntpConfig: { ...TRIAGE_NNTP_CONFIG },
+    nntpMaxConnections: TRIAGE_NNTP_MAX_CONNECTIONS,
+    reuseNntpPool: TRIAGE_REUSE_POOL,
+    nntpKeepAliveMs: TRIAGE_NNTP_KEEP_ALIVE_MS,
+  })
+    .then(() => {
+      console.log('[NZB TRIAGE] Pre-warmed NNTP pool with shared configuration');
+    })
+    .catch((err) => {
+      console.warn('[NZB TRIAGE] Unable to pre-warm NNTP pool', err?.message || err);
+    });
+}
+
 const ADMIN_CONFIG_KEYS = [
   'PORT',
   'ADDON_BASE_URL',
@@ -323,6 +341,7 @@ const ADMIN_CONFIG_KEYS = [
   'NZBDAV_CATEGORY',
   'NZBDAV_CATEGORY_MOVIES',
   'NZBDAV_CATEGORY_SERIES',
+  'NZB_TRIAGE_HEALTH_INDEXERS',
   'SPECIAL_PROVIDER_ID',
   'SPECIAL_PROVIDER_URL',
   'SPECIAL_PROVIDER_SECRET',
@@ -331,6 +350,7 @@ const ADMIN_CONFIG_KEYS = [
   'NZB_TRIAGE_MAX_CANDIDATES',
   'NZB_TRIAGE_PREFERRED_SIZE_GB',
   'NZB_TRIAGE_PRIORITY_INDEXERS',
+  'NZB_TRIAGE_SERIALIZED_INDEXERS',
   'NZB_TRIAGE_DOWNLOAD_CONCURRENCY',
   'NZB_TRIAGE_MAX_CONNECTIONS',
   'NZB_TRIAGE_MAX_PARALLEL_NZBS',
@@ -1038,6 +1058,21 @@ function inferMimeType(fileName) {
 function normalizeReleaseTitle(title) {
   if (!title) return '';
   return title.toString().trim().toLowerCase();
+}
+
+function normalizeIndexerToken(value) {
+  if (value === undefined || value === null) return null;
+  const token = String(value).trim().toLowerCase();
+  return token.length > 0 ? token : null;
+}
+
+function nzbMatchesIndexer(result, tokenSet) {
+  if (!tokenSet || tokenSet.size === 0) return true;
+  const idToken = normalizeIndexerToken(result?.indexerId);
+  if (idToken && tokenSet.has(idToken)) return true;
+  const nameToken = normalizeIndexerToken(result?.indexer);
+  if (nameToken && tokenSet.has(nameToken)) return true;
+  return false;
 }
 
 function triageStatusRank(status) {
@@ -2192,7 +2227,19 @@ async function streamHandler(req, res) {
     const triageOverrides = extractTriageOverrides(req.query || {});
     const requestedDisable = triageOverrides.disabled === true;
     const requestedEnable = triageOverrides.enabled === true;
-    const shouldAttemptTriage = finalNzbResults.length > 0 && !requestedDisable && (requestedEnable || TRIAGE_ENABLED);
+    const overrideIndexerTokens = (triageOverrides.indexers && triageOverrides.indexers.length > 0)
+      ? triageOverrides.indexers
+      : null;
+    const preferredIndexerTokens = overrideIndexerTokens ?? TRIAGE_PRIORITY_INDEXERS;
+    const serializedIndexerTokens = TRIAGE_SERIALIZED_INDEXERS.length > 0
+      ? TRIAGE_SERIALIZED_INDEXERS
+      : (preferredIndexerTokens.length > 0 ? preferredIndexerTokens : []);
+    const healthIndexerTokens = overrideIndexerTokens ?? TRIAGE_HEALTH_INDEXERS;
+    const healthIndexerSet = new Set((healthIndexerTokens || []).map((token) => normalizeIndexerToken(token)).filter(Boolean));
+    const triageEligibleResults = healthIndexerSet.size > 0
+      ? finalNzbResults.filter((result) => nzbMatchesIndexer(result, healthIndexerSet))
+      : [];
+    const shouldAttemptTriage = triageEligibleResults.length > 0 && !requestedDisable && (requestedEnable || TRIAGE_ENABLED);
     let triageOutcome = null;
     let triageDecisions = new Map();
   let triageTitleMap = new Map();
@@ -2202,17 +2249,16 @@ async function streamHandler(req, res) {
         console.warn('[NZB TRIAGE] Skipping health checks because NNTP configuration is missing');
       } else {
         const preferredSizeBytes = triageOverrides.sizeBytes ?? TRIAGE_PREFERRED_SIZE_BYTES;
-        const preferredIndexerTokens = (triageOverrides.indexers && triageOverrides.indexers.length > 0)
-          ? triageOverrides.indexers
-          : TRIAGE_PRIORITY_INDEXERS;
         const triageLogger = (level, message, context) => {
           const logFn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
           if (context) logFn(`[NZB TRIAGE] ${message}`, context);
           else logFn(`[NZB TRIAGE] ${message}`);
         };
         const triageOptions = {
+          allowedIndexerIds: healthIndexerTokens,
           preferredSizeBytes,
           preferredIndexerIds: preferredIndexerTokens,
+          serializedIndexerIds: serializedIndexerTokens,
           timeBudgetMs: TRIAGE_TIME_BUDGET_MS,
           maxCandidates: TRIAGE_MAX_CANDIDATES,
           downloadConcurrency: Math.max(1, TRIAGE_MAX_CANDIDATES),
@@ -2223,7 +2269,7 @@ async function streamHandler(req, res) {
           logger: triageLogger,
         };
         try {
-          triageOutcome = await triageAndRank(finalNzbResults, triageOptions);
+          triageOutcome = await triageAndRank(triageEligibleResults, triageOptions);
           triageDecisions = triageOutcome?.decisions instanceof Map ? triageOutcome.decisions : new Map(triageOutcome?.decisions || []);
           triageTitleMap = buildTriageTitleMap(triageDecisions);
           console.log(`[NZB TRIAGE] Evaluated ${triageOutcome.evaluatedCount}/${triageOutcome.candidatesConsidered} candidate NZBs in ${triageOutcome.elapsedMs} ms (timedOut=${triageOutcome.timedOut})`);

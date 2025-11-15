@@ -756,8 +756,24 @@ function statSegment(pool, segmentId) {
 }
 
 function statSegmentWithClient(client, segmentId) {
+  const STAT_TIMEOUT_MS = 5000; // Aggressive 5s timeout per STAT
   return new Promise((resolve, reject) => {
+    let completed = false;
+    const timer = setTimeout(() => {
+      if (!completed) {
+        completed = true;
+        const error = new Error('STAT timed out after 5s');
+        error.code = 'STAT_TIMEOUT';
+        error.dropClient = true; // Mark client as broken
+        reject(error);
+      }
+    }, STAT_TIMEOUT_MS);
+
     client.stat(`<${segmentId}>`, (err) => {
+      if (completed) return; // Already timed out
+      completed = true;
+      clearTimeout(timer);
+      
       if (err) {
         const error = new Error(err.message || 'STAT failed');
         const codeFromMessage = err.message && err.message.includes('430') ? 'STAT_MISSING' : err.code;
@@ -832,6 +848,35 @@ async function createNntpPool(config, maxConnections, options = {}) {
   const connectionCount = Math.max(1, numeric);
   const keepAliveMs = Number.isFinite(options.keepAliveMs) && options.keepAliveMs > 0 ? options.keepAliveMs : 0;
 
+  const attachErrorHandler = (client) => {
+    if (!client) return;
+    try {
+      client.on('error', (err) => {
+        console.warn('[NZB TRIAGE] NNTP client error (pool)', {
+          code: err?.code,
+          message: err?.message,
+          errno: err?.errno,
+        });
+      });
+    } catch (_) {}
+    try {
+      const socketFields = ['socket', 'stream', '_socket', 'tlsSocket', 'connection'];
+      for (const key of socketFields) {
+        const s = client[key];
+        if (s && typeof s.on === 'function') {
+          s.on('error', (err) => {
+            console.warn('[NZB TRIAGE] NNTP socket error (pool)', {
+              socketProp: key,
+              code: err?.code,
+              message: err?.message,
+              errno: err?.errno,
+            });
+          });
+        }
+      }
+    } catch (_) {}
+  };
+
   const connectTasks = Array.from({ length: connectionCount }, () => createNntpClient(config));
   let initialClients = [];
   try {
@@ -843,6 +888,7 @@ async function createNntpPool(config, maxConnections, options = {}) {
       throw failure.reason;
     }
     initialClients = successes;
+    initialClients.forEach(attachErrorHandler);
   } catch (err) {
     throw err;
   }
@@ -863,6 +909,7 @@ async function createNntpPool(config, maxConnections, options = {}) {
     (async () => {
       try {
         const replacement = await createNntpClient(config);
+        attachErrorHandler(replacement);
         allClients.add(replacement);
         if (waiters.length > 0) {
           const waiter = waiters.shift();
@@ -897,9 +944,60 @@ async function createNntpPool(config, maxConnections, options = {}) {
     }
   };
 
+  const noopTimers = new Map();
+  const KEEPALIVE_INTERVAL_MS = 30000;
+  const KEEPALIVE_TIMEOUT_MS = 6000;
+
+  const scheduleKeepAlive = (client) => {
+    if (closing || noopTimers.has(client)) return;
+    const timer = setTimeout(async () => {
+      noopTimers.delete(client);
+      try {
+        const statStart = Date.now();
+        await Promise.race([
+          new Promise((resolve, reject) => {
+            client.stat('<keepalive-test@invalid>', (err) => {
+              if (err && err.code === 430) {
+                resolve(); // 430 = article not found, which is expected and means socket is alive
+              } else if (err) {
+                reject(err);
+              } else {
+                resolve();
+              }
+            });
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Keep-alive timeout')), KEEPALIVE_TIMEOUT_MS))
+        ]);
+        const elapsed = Date.now() - statStart;
+        timingLog('nntp-keepalive:success', { durationMs: elapsed });
+        if (!closing && idle.includes(client)) {
+          scheduleKeepAlive(client);
+        }
+      } catch (err) {
+        timingLog('nntp-keepalive:failed', { message: err?.message });
+        console.warn('[NZB TRIAGE] Keep-alive failed, replacing client', err?.message || err);
+        const idleIndex = idle.indexOf(client);
+        if (idleIndex !== -1) {
+          idle.splice(idleIndex, 1);
+        }
+        scheduleReplacement(client);
+      }
+    }, KEEPALIVE_INTERVAL_MS);
+    noopTimers.set(client, timer);
+  };
+
+  const cancelKeepAlive = (client) => {
+    const timer = noopTimers.get(client);
+    if (timer) {
+      clearTimeout(timer);
+      noopTimers.delete(client);
+    }
+  };
+
   const releaseClient = (client, drop) => {
     if (!client) return;
     if (drop) {
+      cancelKeepAlive(client);
       scheduleReplacement(client);
       return;
     }
@@ -910,6 +1008,7 @@ async function createNntpPool(config, maxConnections, options = {}) {
     } else {
       idle.push(client);
       touch();
+      scheduleKeepAlive(client);
     }
   };
 
@@ -920,6 +1019,7 @@ async function createNntpPool(config, maxConnections, options = {}) {
     }
     if (idle.length > 0) {
       const client = idle.pop();
+      cancelKeepAlive(client);
       touch();
       resolve(client);
     } else {
@@ -953,6 +1053,8 @@ async function createNntpPool(config, maxConnections, options = {}) {
       if (keepAliveTimer) {
         clearInterval(keepAliveTimer);
       }
+      noopTimers.forEach((timer) => clearTimeout(timer));
+      noopTimers.clear();
       const clientsToClose = Array.from(allClients);
       allClients.clear();
       idle.length = 0;
@@ -1034,8 +1136,34 @@ async function createNntpClient({ host, port = 119, user, pass, useTLS = false, 
   const client = new NNTP();
   const connectStart = Date.now();
   timingLog('nntp-connect:start', { host, port, useTLS, auth: Boolean(user) });
+  
+  // Attach early error handler to catch DNS/connection failures before 'ready'
+  const earlyErrorHandler = (err) => {
+    timingLog('nntp-connect:error', {
+      host,
+      port,
+      useTLS,
+      auth: Boolean(user),
+      durationMs: Date.now() - connectStart,
+      code: err?.code,
+      message: err?.message,
+    });
+    console.warn('[NZB TRIAGE] NNTP connection error', {
+      host,
+      port,
+      useTLS,
+      message: err?.message,
+      code: err?.code
+    });
+  };
+  
+  client.once('error', earlyErrorHandler);
+  
   await new Promise((resolve, reject) => {
     client.once('ready', () => {
+      // Remove the early error handler since we're about to add persistent ones
+      client.removeListener('error', earlyErrorHandler);
+      
       timingLog('nntp-connect:ready', {
         host,
         port,
@@ -1043,27 +1171,62 @@ async function createNntpClient({ host, port = 119, user, pass, useTLS = false, 
         auth: Boolean(user),
         durationMs: Date.now() - connectStart,
       });
+      // Attach a runtime error handler to the client to prevent unhandled socket errors
+      // from bubbling up and crashing the process. We log and let pool replacement
+      // logic handle any broken clients.
+      try {
+        client.on('error', (err) => {
+          timingLog('nntp-client:error', {
+            host,
+            port,
+            useTLS,
+            auth: Boolean(user),
+            message: err?.message,
+            code: err?.code,
+          });
+          console.warn('[NZB TRIAGE] NNTP client runtime error', err?.message || err);
+        });
+      } catch (_) {}
+      try {
+        // attach to a few common socket field names used by different NNTP implementations
+        const socketFields = ['socket', 'stream', '_socket', 'tlsSocket', 'connection'];
+        for (const key of socketFields) {
+          const s = client[key];
+          if (s && typeof s.on === 'function') {
+            s.on('error', (err) => {
+              timingLog('nntp-socket:error', { host, port, socketProp: key, message: err?.message, code: err?.code });
+              console.warn('[NZB TRIAGE] NNTP socket runtime error', key, err?.message || err);
+            });
+          }
+        }
+      } catch (_) {}
       resolve();
     });
+    // This error handler is for connection phase failures (DNS, TLS handshake, auth)
+    // It will be removed and replaced with persistent handlers after 'ready'
     client.once('error', (err) => {
-      timingLog('nntp-connect:error', {
-        host,
-        port,
-        useTLS,
-        auth: Boolean(user),
-        durationMs: Date.now() - connectStart,
-        code: err?.code,
-        message: err?.message,
-      });
-      console.warn('[NZB TRIAGE] NNTP connection error', {
-        host,
-        port,
-        useTLS,
-        message: err?.message,
-        code: err?.code
-      });
       reject(err);
     });
+    
+    // Intercept socket creation to attach error handlers immediately
+    const originalConnect = client.connect;
+    client.connect = function(...args) {
+      const result = originalConnect.apply(this, args);
+      // After connect() is called, the socket should exist
+      process.nextTick(() => {
+        try {
+          const socketFields = ['socket', 'stream', '_socket', 'tlsSocket', 'connection'];
+          for (const key of socketFields) {
+            const s = client[key];
+            if (s && typeof s.on === 'function' && !s.listenerCount('error')) {
+              s.on('error', earlyErrorHandler);
+            }
+          }
+        } catch (_) {}
+      });
+      return result;
+    };
+    
     client.connect({
       host,
       port,
