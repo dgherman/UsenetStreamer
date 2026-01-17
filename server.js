@@ -2007,6 +2007,10 @@ async function streamHandler(req, res) {
           if (!item.downloadUrl) {
             return false;
           }
+          // Filter by requested episode for series searches
+          if (requestedEpisode && !fileMatchesEpisode(item.title, requestedEpisode)) {
+            return false;
+          }
           return resultMatchesStrictPlan(plan, item);
         });
 
