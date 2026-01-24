@@ -60,8 +60,9 @@ const QUALITY_FEATURE_PATTERNS = [
 
 // Blocklist patterns for unplayable/unwanted release types
 // Matches standalone tokens: .iso, -iso-, (iso), space-delimited, etc.
-// Also blocks remux releases (very large files)
-const RELEASE_BLOCKLIST_REGEX = /(?:^|[\s.\-_(\[])(?:iso|img|bin|cue|exe|remux)(?:[\s.\-_\)\]]|$)/i;
+const RELEASE_BLOCKLIST_REGEX = /(?:^|[\s.\-_(\[])(?:iso|img|bin|cue|exe)(?:[\s.\-_\)\]]|$)/i;
+// Separate pattern for remux - matches anywhere (catches BDRemux, BluRay.Remux, etc.)
+const REMUX_BLOCKLIST_REGEX = /remux/i;
 
 const PREFETCH_NZBDAV_JOB_TTL_MS = 60 * 60 * 1000;
 const prefetchedNzbdavJobs = new Map();
@@ -2442,8 +2443,8 @@ async function streamHandler(req, res) {
     const regularStreams = [];
 
     finalNzbResults.forEach((result) => {
-        // Skip releases matching blocklist (ISO, sample, exe, etc.)
-        if (result.title && RELEASE_BLOCKLIST_REGEX.test(result.title)) {
+        // Skip releases matching blocklist (ISO, sample, exe, remux, etc.)
+        if (result.title && (RELEASE_BLOCKLIST_REGEX.test(result.title) || REMUX_BLOCKLIST_REGEX.test(result.title))) {
           return;
         }
 
@@ -2893,7 +2894,7 @@ async function handleNzbdavStream(req, res) {
   }
 
   // Block unwanted release types at stream level (catches cached/stale results)
-  if (title && RELEASE_BLOCKLIST_REGEX.test(title)) {
+  if (title && (RELEASE_BLOCKLIST_REGEX.test(title) || REMUX_BLOCKLIST_REGEX.test(title))) {
     console.log(`[NZBDAV] Blocked stream request for blocklisted release: ${title}`);
     res.status(403).json({ error: 'This release type is blocked (remux/iso/etc)' });
     return;
