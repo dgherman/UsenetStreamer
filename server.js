@@ -2892,6 +2892,13 @@ async function handleNzbdavStream(req, res) {
     return;
   }
 
+  // Block unwanted release types at stream level (catches cached/stale results)
+  if (title && RELEASE_BLOCKLIST_REGEX.test(title)) {
+    console.log(`[NZBDAV] Blocked stream request for blocklisted release: ${title}`);
+    res.status(403).json({ error: 'This release type is blocked (remux/iso/etc)' });
+    return;
+  }
+
   try {
     const category = nzbdavService.getNzbdavCategory(type);
     const requestedEpisode = parseRequestedEpisode(type, id, req.query || {});
