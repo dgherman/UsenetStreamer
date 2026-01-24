@@ -1175,6 +1175,52 @@ async function streamHandler(req, res) {
     triagePrewarmPromise = triggerRequestTriagePrewarm();
 
     const requestedEpisode = parseRequestedEpisode(type, id, req.query || {});
+
+    // Early exit: check persistent instant cache to skip indexer searches entirely
+    if (STREAMING_MODE !== 'native') {
+      const instantEntry = cache.getInstantCacheEntry(type, baseIdentifier, requestedEpisode);
+      if (instantEntry?.nzoId) {
+        try {
+          const categoryForInstant = nzbdavService.getNzbdavCategory(type);
+          const historyCheck = await nzbdavService.fetchCompletedNzbdavHistory([categoryForInstant]);
+          const normalizedTitle = normalizeReleaseTitle(instantEntry.jobName);
+          const historyMatch = normalizedTitle ? historyCheck.get(normalizedTitle) : null;
+
+          if (historyMatch) {
+            console.log(`[INSTANT CACHE] Found cached entry, skipping indexer search: ${instantEntry.jobName}`);
+            const streamUrl = `${ADDON_BASE_URL}/nzb/stream?` + new URLSearchParams({
+              downloadUrl: instantEntry.downloadUrl || '',
+              type,
+              id,
+              title: instantEntry.jobName,
+              historyNzoId: historyMatch.nzoId,
+              historyJobName: historyMatch.jobName,
+              historyCategory: historyMatch.category || categoryForInstant,
+            }).toString();
+
+            const instantStream = {
+              name: `${ADDON_NAME || 'UsenetStreamer'}\n⚡ Instant`,
+              title: instantEntry.jobName,
+              url: streamUrl,
+              behaviorHints: {
+                bingeGroup: `usenetstreamer-instant-${baseIdentifier}`,
+                notWebReady: true,
+              },
+            };
+
+            res.json({ streams: [instantStream] });
+            return;
+          } else {
+            // Entry no longer in history, clear the cache
+            console.log(`[INSTANT CACHE] Cached entry no longer in history, clearing: ${instantEntry.jobName}`);
+            cache.clearInstantCacheEntry(type, baseIdentifier, requestedEpisode);
+          }
+        } catch (instantError) {
+          console.warn(`[INSTANT CACHE] Error checking instant cache: ${instantError.message}`);
+        }
+      }
+    }
+
     const streamCacheKey = STREAM_CACHE_MAX_ENTRIES > 0
       ? buildStreamCacheKey({ type, id, requestedEpisode, query: req.query || {} })
       : null;
@@ -2736,6 +2782,16 @@ async function streamHandler(req, res) {
 
         if (isInstant) {
           instantStreams.push(stream);
+          // Save first instant stream to persistent cache (skip indexer searches next time)
+          if (instantStreams.length === 1 && STREAMING_MODE !== 'native' && historySlot) {
+            cache.setInstantCacheEntry(type, baseIdentifier, requestedEpisode, {
+              nzoId: historySlot.nzoId,
+              jobName: historySlot.jobName || result.title,
+              category: historySlot.category || categoryForType,
+              downloadUrl: result.downloadUrl,
+              size: result.size,
+            });
+          }
         } else {
           regularStreams.push(stream);
         }
