@@ -2278,18 +2278,24 @@ async function streamHandler(req, res) {
     const hasVerifiedResult = triagePool.some((candidate) => getDecisionStatus(candidate) === 'verified');
     let triageEligibleResults = [];
 
+    // Helper to check if candidate is blocklisted (remux/iso/etc)
+    const isBlocklisted = (candidate) =>
+      candidate.title && (RELEASE_BLOCKLIST_REGEX.test(candidate.title) || REMUX_BLOCKLIST_REGEX.test(candidate.title));
+
     if (hasPendingRetries) {
       triageEligibleResults = prioritizeTriageCandidates(triagePool, TRIAGE_MAX_CANDIDATES, {
-        shouldInclude: (candidate) => pendingStatuses.has(getDecisionStatus(candidate)),
+        shouldInclude: (candidate) => pendingStatuses.has(getDecisionStatus(candidate)) && !isBlocklisted(candidate),
       });
     } else if (!hasVerifiedResult) {
       triageEligibleResults = prioritizeTriageCandidates(triagePool, TRIAGE_MAX_CANDIDATES, {
-        shouldInclude: (candidate) => !getDecisionStatus(candidate),
+        shouldInclude: (candidate) => !getDecisionStatus(candidate) && !isBlocklisted(candidate),
       });
     }
 
     if (triageEligibleResults.length === 0 && triageDecisions.size === 0) {
-      triageEligibleResults = prioritizeTriageCandidates(triagePool, TRIAGE_MAX_CANDIDATES);
+      triageEligibleResults = prioritizeTriageCandidates(triagePool, TRIAGE_MAX_CANDIDATES, {
+        shouldInclude: (candidate) => !isBlocklisted(candidate),
+      });
     }
     const candidateHasConclusiveDecision = (candidate) => {
       const decision = triageDecisions.get(candidate.downloadUrl);
