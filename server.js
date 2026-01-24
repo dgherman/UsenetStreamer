@@ -2904,6 +2904,13 @@ async function streamHandler(req, res) {
         jobPromise
           .then((jobInfo) => {
             prefetchedNzbdavJobs.set(prefetchCandidate.downloadUrl, jobInfo);
+            // Also track in in-flight downloads so findMatchingQueueJob can find it
+            nzbdavService.trackInFlightDownload(
+              prefetchCandidate.title,
+              jobInfo.nzoId,
+              prefetchCandidate.downloadUrl,
+              prefetchCandidate.category
+            );
             console.log(`[NZBDAV] Prefetched first verified NZB queued (nzoId=${jobInfo.nzoId})`);
           })
           .catch((prefetchError) => {
