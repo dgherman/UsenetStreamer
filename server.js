@@ -2790,7 +2790,12 @@ async function streamHandler(req, res) {
 
     if (TRIAGE_PREFETCH_FIRST_VERIFIED && STREAMING_MODE !== 'native' && prefetchCandidate) {
       prunePrefetchedNzbdavJobs();
-      if (prefetchedNzbdavJobs.has(prefetchCandidate.downloadUrl)) {
+      // Skip prefetch if already in nzbdav2 history (instant playback available)
+      const prefetchNormalizedTitle = normalizeReleaseTitle(prefetchCandidate.title);
+      const alreadyInHistory = prefetchNormalizedTitle && historyByTitle && historyByTitle.has(prefetchNormalizedTitle);
+      if (alreadyInHistory) {
+        console.log(`[NZBDAV] Skipping prefetch - already in history: ${prefetchCandidate.title}`);
+      } else if (prefetchedNzbdavJobs.has(prefetchCandidate.downloadUrl)) {
         // Prefetch already running or completed for this download URL
       } else {
         const jobPromise = new Promise((resolve, reject) => {
