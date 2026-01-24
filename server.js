@@ -60,7 +60,8 @@ const QUALITY_FEATURE_PATTERNS = [
 
 // Blocklist patterns for unplayable/unwanted release types
 // Matches standalone tokens: .iso, -iso-, (iso), space-delimited, etc.
-const RELEASE_BLOCKLIST_REGEX = /(?:^|[\s.\-_(\[])(?:iso|img|bin|cue|exe)(?:[\s.\-_\)\]]|$)/i;
+// Also blocks remux releases (very large files)
+const RELEASE_BLOCKLIST_REGEX = /(?:^|[\s.\-_(\[])(?:iso|img|bin|cue|exe|remux)(?:[\s.\-_\)\]]|$)/i;
 
 const PREFETCH_NZBDAV_JOB_TTL_MS = 60 * 60 * 1000;
 const prefetchedNzbdavJobs = new Map();
