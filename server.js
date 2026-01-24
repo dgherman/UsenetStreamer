@@ -2400,7 +2400,9 @@ async function streamHandler(req, res) {
             size: candidate.size,
             fileName: candidate.title,
           });
-            if (!prefetchCandidate && STREAMING_MODE !== 'native') {
+            // Skip blocklisted candidates for prefetch
+            const isBlocklisted = RELEASE_BLOCKLIST_REGEX.test(candidate.title) || REMUX_BLOCKLIST_REGEX.test(candidate.title);
+            if (!prefetchCandidate && STREAMING_MODE !== 'native' && !isBlocklisted) {
               prefetchCandidate = {
                 downloadUrl: candidate.downloadUrl,
                 title: candidate.title,
@@ -2421,11 +2423,15 @@ async function streamHandler(req, res) {
       });
     }
 
-      // If prefetch is enabled, capture first verified NZB payload even when triage cache completion criteria aren’t met
+      // If prefetch is enabled, capture first verified NZB payload even when triage cache completion criteria aren't met
       if (TRIAGE_PREFETCH_FIRST_VERIFIED && STREAMING_MODE !== 'native' && !prefetchCandidate && triageDecisions && triageDecisions.size > 0) {
         for (const candidate of triageEligibleResults) {
           const decision = triageDecisions.get(candidate.downloadUrl);
           if (decision && decision.status === 'verified' && typeof decision.nzbPayload === 'string') {
+            // Skip blocklisted candidates for prefetch
+            if (RELEASE_BLOCKLIST_REGEX.test(candidate.title) || REMUX_BLOCKLIST_REGEX.test(candidate.title)) {
+              continue;
+            }
             prefetchCandidate = {
               downloadUrl: candidate.downloadUrl,
               title: candidate.title,
@@ -2441,6 +2447,14 @@ async function streamHandler(req, res) {
             delete decision.nzbPayload;
             break;
           }
+        }
+      }
+
+      // Log when prefetch is enabled but no candidate found (likely all blocklisted)
+      if (TRIAGE_PREFETCH_FIRST_VERIFIED && STREAMING_MODE !== 'native' && !prefetchCandidate && triageDecisions && triageDecisions.size > 0) {
+        const verifiedCount = Array.from(triageDecisions.values()).filter(d => d.status === 'verified').length;
+        if (verifiedCount > 0) {
+          console.log(`[NZBDAV] Prefetch skipped - ${verifiedCount} verified candidate(s) all blocklisted (remux/iso/etc)`);
         }
       }
 
