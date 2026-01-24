@@ -33,6 +33,9 @@ function clearNzbdavStreamCache(reason = 'manual') {
   nzbdavStreamCache.clear();
 }
 
+// Timeout pending window - how long to remember that a download might still be in progress
+const TIMEOUT_PENDING_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
 async function getOrCreateNzbdavStream(cacheKey, builder) {
   cleanupNzbdavCache();
   const existing = nzbdavStreamCache.get(cacheKey);
@@ -46,6 +49,12 @@ async function getOrCreateNzbdavStream(cacheKey, builder) {
     }
     if (existing.status === 'failed') {
       throw existing.error;
+    }
+    // For timeout_pending status, we allow retry but the builder will check
+    // for in-flight downloads and reuse them instead of starting new ones
+    if (existing.status === 'timeout_pending') {
+      console.log('[CACHE] Previous request timed out, retrying (in-flight tracking will prevent duplicates)');
+      // Fall through to create new attempt
     }
   }
 
@@ -65,16 +74,40 @@ async function getOrCreateNzbdavStream(cacheKey, builder) {
     return await promise;
   } catch (error) {
     if (error?.isNzbdavFailure) {
+      // Permanent failure - cache the error
       nzbdavStreamCache.set(cacheKey, {
         status: 'failed',
         error,
         expiresAt: NZBDAV_CACHE_TTL_MS > 0 ? Date.now() + NZBDAV_CACHE_TTL_MS : null
       });
+    } else if (isTimeoutError(error)) {
+      // Timeout - the download might still be in progress in nzbdav2
+      // Keep a timeout_pending status so subsequent requests can retry
+      // but the in-flight tracking in nzbdav.js will prevent duplicate downloads
+      console.log('[CACHE] Request timed out, marking as timeout_pending for potential retry');
+      nzbdavStreamCache.set(cacheKey, {
+        status: 'timeout_pending',
+        error,
+        startedAt: Date.now(),
+        expiresAt: Date.now() + TIMEOUT_PENDING_TTL_MS
+      });
     } else {
+      // Other errors - delete the cache entry
       nzbdavStreamCache.delete(cacheKey);
     }
     throw error;
   }
+}
+
+function isTimeoutError(error) {
+  if (!error) return false;
+  const message = error.message || '';
+  return message.includes('Timeout') ||
+         message.includes('timeout') ||
+         message.includes('ETIMEDOUT') ||
+         message.includes('ESOCKETTIMEDOUT') ||
+         error.code === 'ETIMEDOUT' ||
+         error.code === 'ESOCKETTIMEDOUT';
 }
 
 function buildNzbdavCacheKey(downloadUrl, category, requestedEpisode = null) {
@@ -89,15 +122,15 @@ function getNzbdavCacheStats() {
   const stats = {
     entries: nzbdavStreamCache.size,
     ttlMs: NZBDAV_CACHE_TTL_MS,
-    byStatus: { ready: 0, pending: 0, failed: 0 },
+    byStatus: { ready: 0, pending: 0, failed: 0, timeout_pending: 0 },
   };
-  
+
   for (const entry of nzbdavStreamCache.values()) {
     if (entry.status) {
       stats.byStatus[entry.status] = (stats.byStatus[entry.status] || 0) + 1;
     }
   }
-  
+
   return stats;
 }
 

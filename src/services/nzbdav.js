@@ -23,7 +23,11 @@ let NZBDAV_CATEGORY_SERIES = process.env.NZBDAV_CATEGORY_SERIES || 'Tv';
 let NZBDAV_CATEGORY_DEFAULT = process.env.NZBDAV_CATEGORY_DEFAULT || 'Movies';
 let NZBDAV_CATEGORY_OVERRIDE = (process.env.NZBDAV_CATEGORY || '').trim();
 let NZBDAV_POLL_INTERVAL_MS = 2000;
-let NZBDAV_POLL_TIMEOUT_MS = 80000;
+let NZBDAV_POLL_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.NZBDAV_POLL_TIMEOUT_SECONDS);
+  // Default 80 seconds, allow up to 10 minutes (600 seconds)
+  return Number.isFinite(raw) && raw > 0 ? Math.min(raw, 600) * 1000 : 80000;
+})();
 let NZBDAV_HISTORY_FETCH_LIMIT = (() => {
   const raw = Number(process.env.NZBDAV_HISTORY_FETCH_LIMIT);
   return Number.isFinite(raw) && raw > 0 ? Math.min(raw, 500) : 400;
@@ -48,7 +52,11 @@ function reloadConfig() {
   NZBDAV_CATEGORY_DEFAULT = process.env.NZBDAV_CATEGORY_DEFAULT || 'Movies';
   NZBDAV_CATEGORY_OVERRIDE = (process.env.NZBDAV_CATEGORY || '').trim();
   NZBDAV_POLL_INTERVAL_MS = 2000;
-  NZBDAV_POLL_TIMEOUT_MS = 80000;
+  NZBDAV_POLL_TIMEOUT_MS = (() => {
+    const raw = Number(process.env.NZBDAV_POLL_TIMEOUT_SECONDS);
+    // Default 80 seconds, allow up to 10 minutes (600 seconds)
+    return Number.isFinite(raw) && raw > 0 ? Math.min(raw, 600) * 1000 : 80000;
+  })();
   NZBDAV_HISTORY_FETCH_LIMIT = (() => {
     const raw = Number(process.env.NZBDAV_HISTORY_FETCH_LIMIT);
     return Number.isFinite(raw) && raw > 0 ? Math.min(raw, 500) : 400;
@@ -362,6 +370,117 @@ function buildNzbdavCacheKey(downloadUrl, category, requestedEpisode = null) {
   return keyParts.join('|');
 }
 
+// In-flight download tracking to prevent duplicate downloads
+const inFlightDownloads = new Map(); // normalizedTitle -> { nzoId, startedAt, downloadUrl, category }
+const IN_FLIGHT_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+function cleanupInFlightDownloads() {
+  const cutoff = Date.now() - IN_FLIGHT_TTL_MS;
+  for (const [key, entry] of inFlightDownloads.entries()) {
+    if (entry.startedAt < cutoff) {
+      inFlightDownloads.delete(key);
+    }
+  }
+}
+
+function trackInFlightDownload(title, nzoId, downloadUrl, category) {
+  const normalized = normalizeReleaseTitle(title);
+  if (!normalized) return;
+  inFlightDownloads.set(normalized, {
+    nzoId,
+    startedAt: Date.now(),
+    downloadUrl,
+    category
+  });
+  console.log(`[NZBDAV] Tracking in-flight download: ${normalized} (${nzoId})`);
+}
+
+function getInFlightDownload(title) {
+  cleanupInFlightDownloads();
+  const normalized = normalizeReleaseTitle(title);
+  if (!normalized) return null;
+  return inFlightDownloads.get(normalized) || null;
+}
+
+function clearInFlightDownload(title) {
+  const normalized = normalizeReleaseTitle(title);
+  if (normalized) {
+    inFlightDownloads.delete(normalized);
+  }
+}
+
+async function fetchNzbdavQueue(category = null) {
+  ensureNzbdavConfigured();
+
+  const params = buildNzbdavApiParams('queue', {
+    start: '0',
+    limit: '100',
+    category: category || undefined
+  });
+
+  const headers = {};
+  if (NZBDAV_API_KEY) {
+    headers['x-api-key'] = NZBDAV_API_KEY;
+  }
+
+  try {
+    const response = await axios.get(`${NZBDAV_URL}/api`, {
+      params,
+      timeout: NZBDAV_API_TIMEOUT_MS,
+      headers,
+      validateStatus: (status) => status < 500
+    });
+
+    if (!response.data?.status) {
+      console.warn('[NZBDAV] Queue fetch returned non-success status');
+      return [];
+    }
+
+    const queue = response.data?.queue || response.data?.Queue;
+    return queue?.slots || queue?.Slots || [];
+  } catch (error) {
+    console.warn(`[NZBDAV] Failed to fetch queue: ${error.message}`);
+    return [];
+  }
+}
+
+async function findMatchingQueueJob(title, category) {
+  const normalizedTitle = normalizeReleaseTitle(title);
+  if (!normalizedTitle) return null;
+
+  // First check in-flight tracking (faster, local)
+  const inFlight = getInFlightDownload(title);
+  if (inFlight) {
+    console.log(`[NZBDAV] Found in-flight download match: ${inFlight.nzoId}`);
+    return {
+      nzo_id: inFlight.nzoId,
+      category: inFlight.category,
+      source: 'in_flight_tracking'
+    };
+  }
+
+  // Then check nzbdav2 queue
+  const queueSlots = await fetchNzbdavQueue(category);
+
+  for (const slot of queueSlots) {
+    const jobName = slot?.job_name || slot?.JobName || slot?.name || slot?.Name || slot?.nzb_name || slot?.NzbName;
+    if (!jobName) continue;
+
+    const normalizedJobName = normalizeReleaseTitle(jobName);
+    if (normalizedJobName === normalizedTitle) {
+      const nzoId = slot?.nzo_id || slot?.nzoId || slot?.NzoId;
+      console.log(`[NZBDAV] Found matching job in queue: ${nzoId} (${jobName})`);
+      return {
+        ...slot,
+        nzo_id: nzoId,
+        source: 'queue'
+      };
+    }
+  }
+
+  return null;
+}
+
 // WebDAV client getter (uses module-level webdavClientPromise declared at top)
 async function getWebdavClient() {
   if (webdavClientPromise) return webdavClientPromise;
@@ -489,21 +608,40 @@ async function buildNzbdavStream({ downloadUrl, category, title, requestedEpisod
         slotCategory = slot?.category || slot?.Category || reuseCategory;
         slotJobName = slot?.job_name || slot?.JobName || slot?.name || slot?.Name || existingSlot?.jobName || title;
         console.log(`[NZBDAV] Reusing completed NZB ${slotJobName} (${nzoId})`);
+        // Clear in-flight tracking on successful reuse
+        clearInFlightDownload(title);
       } else {
-        const cachedNzbEntry = inlineCachedEntry || cache.getVerifiedNzbCacheEntry(downloadUrl);
-        if (cachedNzbEntry) {
-          console.log('[CACHE] Using verified NZB payload', { downloadUrl });
+        // IMPORTANT: Check if this download is already in progress before queueing
+        const existingQueueJob = await findMatchingQueueJob(title, category);
+        if (existingQueueJob?.nzo_id) {
+          console.log(`[NZBDAV] Found existing download in progress, waiting: ${existingQueueJob.nzo_id} (source: ${existingQueueJob.source})`);
+          nzoId = existingQueueJob.nzo_id;
+          slot = await waitForNzbdavHistorySlot(nzoId, existingQueueJob.category || category);
+          slotCategory = slot?.category || slot?.Category || existingQueueJob.category || category;
+          slotJobName = slot?.job_name || slot?.JobName || slot?.name || slot?.Name || title;
+          // Clear in-flight tracking on successful completion
+          clearInFlightDownload(title);
+        } else {
+          // No existing download found, queue a new one
+          const cachedNzbEntry = inlineCachedEntry || cache.getVerifiedNzbCacheEntry(downloadUrl);
+          if (cachedNzbEntry) {
+            console.log('[CACHE] Using verified NZB payload', { downloadUrl });
+          }
+          const added = await addNzbToNzbdav({
+            downloadUrl,
+            cachedEntry: cachedNzbEntry,
+            category,
+            jobLabel: title,
+          });
+          nzoId = added.nzoId;
+          // Track this download as in-flight immediately after queueing
+          trackInFlightDownload(title, nzoId, downloadUrl, category);
+          slot = await waitForNzbdavHistorySlot(nzoId, category);
+          slotCategory = slot?.category || slot?.Category || category;
+          slotJobName = slot?.job_name || slot?.JobName || slot?.name || slot?.Name || title;
+          // Clear in-flight tracking on successful completion
+          clearInFlightDownload(title);
         }
-        const added = await addNzbToNzbdav({
-          downloadUrl,
-          cachedEntry: cachedNzbEntry,
-          category,
-          jobLabel: title,
-        });
-        nzoId = added.nzoId;
-        slot = await waitForNzbdavHistorySlot(nzoId, category);
-        slotCategory = slot?.category || slot?.Category || category;
-        slotJobName = slot?.job_name || slot?.JobName || slot?.name || slot?.Name || title;
       }
 
       if (!slotJobName) {
@@ -895,6 +1033,11 @@ module.exports = {
   addNzbToNzbdav,
   waitForNzbdavHistorySlot,
   fetchCompletedNzbdavHistory,
+  fetchNzbdavQueue,
+  findMatchingQueueJob,
+  trackInFlightDownload,
+  getInFlightDownload,
+  clearInFlightDownload,
   buildNzbdavCacheKey,
   listWebdavDirectory,
   findBestVideoFile,
