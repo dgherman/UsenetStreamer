@@ -113,8 +113,20 @@ async function getOrCreateNzbdavStream(cacheKey, builder) {
   cleanupNzbdavCache();
   const existing = nzbdavStreamCache.get(cacheKey);
 
+  // DEBUG: Log cache lookup
+  console.log('[NZBDAV CACHE DEBUG] Lookup', {
+    cacheKey: cacheKey?.slice(0, 100),
+    hasExisting: Boolean(existing),
+    existingStatus: existing?.status,
+    existingViewPath: existing?.data?.viewPath?.slice(0, 80),
+  });
+
   if (existing) {
     if (existing.status === 'ready') {
+      console.log('[NZBDAV CACHE DEBUG] Returning cached ready entry', {
+        viewPath: existing.data?.viewPath?.slice(0, 80),
+        jobName: existing.data?.jobName?.slice(0, 60),
+      });
       return existing.data;
     }
     if (existing.status === 'pending') {
