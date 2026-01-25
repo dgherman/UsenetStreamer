@@ -2555,6 +2555,17 @@ async function streamHandler(req, res) {
     let triageLogSuppressed = false;
     const activePreferredLanguages = resolvedPreferredLanguages;
 
+    // Collect verified, non-blocklisted candidates for automatic fallback on failure
+    // These will be included as fallback URLs in stream requests
+    const verifiedFallbackCandidates = finalNzbResults
+      .filter((r) => {
+        if (!r.downloadUrl) return false;
+        if (r.title && (RELEASE_BLOCKLIST_REGEX.test(r.title) || REMUX_BLOCKLIST_REGEX.test(r.title))) return false;
+        const decision = triageDecisions.get(r.downloadUrl);
+        return decision?.status === 'verified';
+      })
+      .map((r) => r.downloadUrl);
+
     const instantStreams = [];
     const regularStreams = [];
 
@@ -2721,6 +2732,14 @@ async function streamHandler(req, res) {
           if (historySlot.category) {
             baseParams.set('historyCategory', historySlot.category);
           }
+        }
+
+        // Add fallback URLs for automatic retry on explicit failure (max 2 fallbacks)
+        const fallbackUrls = verifiedFallbackCandidates
+          .filter((url) => url !== result.downloadUrl)
+          .slice(0, 2);
+        if (fallbackUrls.length > 0) {
+          baseParams.set('fallbackUrls', fallbackUrls.join('|'));
         }
 
         const tokenSegment = ADDON_SHARED_SECRET ? `/${ADDON_SHARED_SECRET}` : '';
@@ -3021,10 +3040,17 @@ async function handleEasynewsNzbDownload(req, res) {
   }
 }
 
-async function handleNzbdavStream(req, res) {
-  const { downloadUrl, type = 'movie', id = '', title = 'NZB Stream' } = req.query;
+async function handleNzbdavStream(req, res, internalDownloadUrl = null, internalAttempt = 0) {
+  // Support internal recursive calls with override URL
+  const downloadUrl = internalDownloadUrl || req.query.downloadUrl;
+  const { type = 'movie', id = '', title = 'NZB Stream' } = req.query;
   const easynewsPayload = typeof req.query.easynewsPayload === 'string' ? req.query.easynewsPayload : null;
   const declaredSize = Number(req.query.size);
+
+  // Parse fallback URLs for automatic retry on failure
+  const fallbackUrlsRaw = req.query.fallbackUrls || '';
+  const allFallbackUrls = fallbackUrlsRaw ? fallbackUrlsRaw.split('|').filter(Boolean) : [];
+  const maxFallbackAttempts = 3;
 
   if (!downloadUrl) {
     res.status(400).json({ error: 'downloadUrl query parameter is required' });
@@ -3037,6 +3063,17 @@ async function handleNzbdavStream(req, res) {
     res.status(403).json({ error: 'This release type is blocked (remux/iso/etc)' });
     return;
   }
+
+  // Helper to try next fallback on explicit failure
+  const tryNextFallback = async (failedUrl, error) => {
+    const remainingFallbacks = allFallbackUrls.filter((url) => url !== failedUrl && url !== req.query.downloadUrl);
+    if (remainingFallbacks.length > 0 && internalAttempt < maxFallbackAttempts) {
+      const nextUrl = remainingFallbacks[0];
+      console.log(`[NZBDAV] Trying fallback candidate (attempt ${internalAttempt + 2}/${maxFallbackAttempts + 1}): ${nextUrl.slice(0, 80)}...`);
+      return handleNzbdavStream(req, res, nextUrl, internalAttempt + 1);
+    }
+    return false; // No more fallbacks
+  };
 
   try {
     const category = nzbdavService.getNzbdavCategory(type);
@@ -3129,8 +3166,12 @@ async function handleNzbdavStream(req, res) {
 
     await nzbdavService.proxyNzbdavStream(req, res, streamData.viewPath, streamData.fileName || '');
   } catch (error) {
+    // On explicit nzbdav2 failure, try fallback candidates before giving up
     if (error?.isNzbdavFailure) {
       console.warn('[NZBDAV] Stream failure detected:', error.failureMessage || error.message);
+      const triedFallback = await tryNextFallback(downloadUrl, error);
+      if (triedFallback !== false) return; // Fallback handled the response
+
       const served = await nzbdavService.streamFailureVideo(req, res, error);
       if (!served && !res.headersSent) {
         res.status(502).json({ error: error.failureMessage || error.message });
@@ -3140,8 +3181,12 @@ async function handleNzbdavStream(req, res) {
       return;
     }
 
+    // On NO_VIDEO_FILES, try fallback candidates before giving up
     if (error?.code === 'NO_VIDEO_FILES') {
       console.warn('[NZBDAV] Stream failure due to missing playable files');
+      const triedFallback = await tryNextFallback(downloadUrl, error);
+      if (triedFallback !== false) return; // Fallback handled the response
+
       const served = await nzbdavService.streamVideoTypeFailure(req, res, error);
       if (!served && !res.headersSent) {
         res.status(502).json({ error: error.message });
