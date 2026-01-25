@@ -8,6 +8,7 @@ function clearAllCaches(reason = 'manual') {
   streamCache.clearStreamResponseCache(reason);
   nzbCache.clearVerifiedNzbCache(reason);
   nzbdavCache.clearNzbdavStreamCache(reason);
+  nzbdavCache.clearAllFailedDownloadUrls(reason);
 }
 
 function getAllCacheStats() {

@@ -1,8 +1,13 @@
 // NZBDav stream mount cache module
 const nzbdavStreamCache = new Map();
 
+// Negative cache for failed download URLs (global, not per-request)
+// Prevents retrying known-bad NZBs across different requests
+const failedDownloadUrlCache = new Map();
+
 // Parse cache configuration from environment
 let NZBDAV_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+let NEGATIVE_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours default
 
 function reloadNzbdavCacheConfig() {
   const raw = Number(process.env.NZBDAV_CACHE_TTL_MINUTES);
@@ -11,9 +16,77 @@ function reloadNzbdavCacheConfig() {
   } else {
     NZBDAV_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
   }
+
+  // Negative cache TTL (hours) - how long to remember failed download URLs
+  const negativeRaw = Number(process.env.NZBDAV_NEGATIVE_CACHE_TTL_HOURS);
+  if (Number.isFinite(negativeRaw) && negativeRaw >= 0) {
+    NEGATIVE_CACHE_TTL_MS = negativeRaw * 60 * 60 * 1000;
+  } else {
+    NEGATIVE_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours default
+  }
 }
 
 reloadNzbdavCacheConfig();
+
+// --- Negative cache functions ---
+
+function cleanupNegativeCache() {
+  if (NEGATIVE_CACHE_TTL_MS <= 0) return;
+
+  const now = Date.now();
+  for (const [url, entry] of failedDownloadUrlCache.entries()) {
+    if (entry.expiresAt && entry.expiresAt <= now) {
+      failedDownloadUrlCache.delete(url);
+    }
+  }
+}
+
+function isDownloadUrlFailed(downloadUrl) {
+  cleanupNegativeCache();
+  const entry = failedDownloadUrlCache.get(downloadUrl);
+  if (!entry) return null;
+  if (entry.expiresAt && entry.expiresAt <= Date.now()) {
+    failedDownloadUrlCache.delete(downloadUrl);
+    return null;
+  }
+  return entry;
+}
+
+function markDownloadUrlFailed(downloadUrl, failureReason, errorCode = null) {
+  if (NEGATIVE_CACHE_TTL_MS <= 0) return; // Negative cache disabled
+
+  failedDownloadUrlCache.set(downloadUrl, {
+    failureReason,
+    errorCode,
+    failedAt: Date.now(),
+    expiresAt: Date.now() + NEGATIVE_CACHE_TTL_MS,
+  });
+  console.log(`[NEGATIVE CACHE] Marked URL as failed: ${downloadUrl.slice(0, 80)}... (reason: ${failureReason})`);
+}
+
+function clearFailedDownloadUrl(downloadUrl) {
+  if (failedDownloadUrlCache.has(downloadUrl)) {
+    failedDownloadUrlCache.delete(downloadUrl);
+    console.log(`[NEGATIVE CACHE] Cleared failed URL: ${downloadUrl.slice(0, 80)}...`);
+    return true;
+  }
+  return false;
+}
+
+function clearAllFailedDownloadUrls(reason = 'manual') {
+  if (failedDownloadUrlCache.size > 0) {
+    console.log('[NEGATIVE CACHE] Cleared all failed URLs', { reason, entries: failedDownloadUrlCache.size });
+  }
+  failedDownloadUrlCache.clear();
+}
+
+function getNegativeCacheStats() {
+  cleanupNegativeCache();
+  return {
+    entries: failedDownloadUrlCache.size,
+    ttlMs: NEGATIVE_CACHE_TTL_MS,
+  };
+}
 
 function cleanupNzbdavCache() {
   if (NZBDAV_CACHE_TTL_MS <= 0) return;
@@ -123,6 +196,7 @@ function getNzbdavCacheStats() {
     entries: nzbdavStreamCache.size,
     ttlMs: NZBDAV_CACHE_TTL_MS,
     byStatus: { ready: 0, pending: 0, failed: 0, timeout_pending: 0 },
+    negativeCache: getNegativeCacheStats(),
   };
 
   for (const entry of nzbdavStreamCache.values()) {
@@ -139,6 +213,12 @@ module.exports = {
   clearNzbdavStreamCache,
   getOrCreateNzbdavStream,
   buildNzbdavCacheKey,
+  // Negative cache exports
+  isDownloadUrlFailed,
+  markDownloadUrlFailed,
+  clearFailedDownloadUrl,
+  clearAllFailedDownloadUrls,
+  getNegativeCacheStats,
   getNzbdavCacheStats,
   reloadNzbdavCacheConfig,
 };

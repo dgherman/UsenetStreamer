@@ -3067,13 +3067,26 @@ async function handleNzbdavStream(req, res, internalDownloadUrl = null, internal
   // Helper to try next fallback on explicit failure
   const tryNextFallback = async (failedUrl, error) => {
     const remainingFallbacks = allFallbackUrls.filter((url) => url !== failedUrl && url !== req.query.downloadUrl);
-    if (remainingFallbacks.length > 0 && internalAttempt < maxFallbackAttempts) {
-      const nextUrl = remainingFallbacks[0];
+    // Also filter out URLs that are in the negative cache
+    const viableFallbacks = remainingFallbacks.filter((url) => !cache.isDownloadUrlFailed(url));
+    if (viableFallbacks.length > 0 && internalAttempt < maxFallbackAttempts) {
+      const nextUrl = viableFallbacks[0];
       console.log(`[NZBDAV] Trying fallback candidate (attempt ${internalAttempt + 2}/${maxFallbackAttempts + 1}): ${nextUrl.slice(0, 80)}...`);
       return handleNzbdavStream(req, res, nextUrl, internalAttempt + 1);
     }
     return false; // No more fallbacks
   };
+
+  // Check negative cache - skip known-bad download URLs
+  const failedEntry = cache.isDownloadUrlFailed(downloadUrl);
+  if (failedEntry) {
+    console.log(`[NEGATIVE CACHE] Skipping known-failed URL: ${downloadUrl.slice(0, 80)}... (reason: ${failedEntry.failureReason})`);
+    // Try fallback if available
+    const triedFallback = await tryNextFallback(downloadUrl, new Error(failedEntry.failureReason));
+    if (triedFallback !== false) return;
+    res.status(502).json({ error: `Previously failed: ${failedEntry.failureReason}` });
+    return;
+  }
 
   try {
     const category = nzbdavService.getNzbdavCategory(type);
@@ -3169,6 +3182,7 @@ async function handleNzbdavStream(req, res, internalDownloadUrl = null, internal
     // On explicit nzbdav2 failure, try fallback candidates before giving up
     if (error?.isNzbdavFailure) {
       console.warn('[NZBDAV] Stream failure detected:', error.failureMessage || error.message);
+      cache.markDownloadUrlFailed(downloadUrl, error.failureMessage || error.message, 'nzbdav_failure');
       const triedFallback = await tryNextFallback(downloadUrl, error);
       if (triedFallback !== false) return; // Fallback handled the response
 
@@ -3184,6 +3198,7 @@ async function handleNzbdavStream(req, res, internalDownloadUrl = null, internal
     // On NO_VIDEO_FILES, try fallback candidates before giving up
     if (error?.code === 'NO_VIDEO_FILES') {
       console.warn('[NZBDAV] Stream failure due to missing playable files');
+      cache.markDownloadUrlFailed(downloadUrl, 'No playable video files', 'no_video_files');
       const triedFallback = await tryNextFallback(downloadUrl, error);
       if (triedFallback !== false) return; // Fallback handled the response
 
