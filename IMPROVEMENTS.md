@@ -40,6 +40,25 @@ It does NOT help with slow downloads where Stremio gives up waiting.
 
 ---
 
+### 2b. Smarter unverified candidate handling - IMPLEMENTED
+
+**Status:** Implemented in commit `f9689ca`
+
+**Problem:** When all triaged candidates returned `unverified` (e.g., due to `stat-error`), the system was stuck retrying the same failing candidates instead of exploring further down the pool. With 79 candidates in the pool but only 4 being triaged, valid candidates were never tried.
+
+**Solution:**
+1. **Explore new candidates first:** On retry, prefer candidates that haven't been tried yet over retrying unverified ones. This explores more of the pool instead of getting stuck on the first batch.
+2. **Prefetch unverified as fallback:** If no verified candidates exist, select the best unverified candidate for prefetch anyway. This gives the user something to try rather than nothing.
+
+**Implementation details:**
+- Changed candidate selection priority: new candidates → unverified retries
+- Added unverified fallback to early prefetch with language-aware selection
+- Logs `[PREFETCH] No verified candidates - selected unverified fallback: <title>`
+
+**Benefit:** More of the candidate pool gets explored, and users get a prefetched result even when verification fails.
+
+---
+
 ## Medium Impact
 
 ### 3. Negative caching - IMPLEMENTED
@@ -182,6 +201,7 @@ NZB_BLOCKLIST_PATTERNS=remux,/\.iso$/i,bdmv,disc
 |-------------|--------|--------|----------|--------|
 | 1. Language-aware prefetch | High | Low | P1 | DONE |
 | 2. Automatic fallback | High | Medium | P1 | DONE |
+| 2b. Unverified candidate handling | High | Low | P1 | DONE |
 | 3. Negative caching | Medium | Low | P2 | DONE |
 | 7. Configurable blocklist | Low | Low | P2 | |
 | 8. Health check endpoint | Low | Low | P2 | |
