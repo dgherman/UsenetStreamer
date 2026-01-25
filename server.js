@@ -3097,8 +3097,10 @@ async function handleEasynewsNzbDownload(req, res) {
   }
 }
 
-async function handleNzbdavStream(req, res, internalDownloadUrl = null, internalAttempt = 0) {
+async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, internalAttempt = 0) {
   // Support internal recursive calls with override URL
+  // Note: When called by Express as route handler, third arg is `next` function - ignore it
+  const internalDownloadUrl = typeof internalDownloadUrlOrNext === 'string' ? internalDownloadUrlOrNext : null;
   const downloadUrl = internalDownloadUrl || req.query.downloadUrl;
   const { type = 'movie', id = '', title = 'NZB Stream' } = req.query;
   const easynewsPayload = typeof req.query.easynewsPayload === 'string' ? req.query.easynewsPayload : null;
