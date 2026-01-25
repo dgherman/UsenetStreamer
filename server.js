@@ -2282,13 +2282,19 @@ async function streamHandler(req, res) {
     const isBlocklisted = (candidate) =>
       candidate.title && (RELEASE_BLOCKLIST_REGEX.test(candidate.title) || REMUX_BLOCKLIST_REGEX.test(candidate.title));
 
-    if (hasPendingRetries) {
-      triageEligibleResults = prioritizeTriageCandidates(triagePool, TRIAGE_MAX_CANDIDATES, {
-        shouldInclude: (candidate) => pendingStatuses.has(getDecisionStatus(candidate)) && !isBlocklisted(candidate),
-      });
-    } else if (!hasVerifiedResult) {
+    // Strategy: Always prefer NEW candidates (no decision yet) over retrying unverified ones
+    // This explores more of the pool instead of getting stuck on failing candidates
+    const hasNewCandidates = triagePool.some((candidate) => !getDecisionStatus(candidate) && !isBlocklisted(candidate));
+
+    if (!hasVerifiedResult && hasNewCandidates) {
+      // Prefer new candidates that haven't been tried yet
       triageEligibleResults = prioritizeTriageCandidates(triagePool, TRIAGE_MAX_CANDIDATES, {
         shouldInclude: (candidate) => !getDecisionStatus(candidate) && !isBlocklisted(candidate),
+      });
+    } else if (hasPendingRetries && !hasVerifiedResult) {
+      // Only retry unverified if no new candidates left and no verified result
+      triageEligibleResults = prioritizeTriageCandidates(triagePool, TRIAGE_MAX_CANDIDATES, {
+        shouldInclude: (candidate) => pendingStatuses.has(getDecisionStatus(candidate)) && !isBlocklisted(candidate),
       });
     }
 
@@ -2495,6 +2501,48 @@ async function streamHandler(req, res) {
             fileName: candidate.title,
           });
           delete decision.nzbPayload;
+        } else {
+          // Fallback: If no verified candidates, select best unverified candidate for prefetch
+          // This gives the user something to try rather than nothing
+          const unverifiedCandidates = [];
+          for (const candidate of triageEligibleResults) {
+            const decision = triageDecisions.get(candidate.downloadUrl);
+            if (decision && decision.status === 'unverified' && typeof decision.nzbPayload === 'string') {
+              // Skip blocklisted candidates
+              if (RELEASE_BLOCKLIST_REGEX.test(candidate.title) || REMUX_BLOCKLIST_REGEX.test(candidate.title)) {
+                continue;
+              }
+              unverifiedCandidates.push({ candidate, decision });
+            }
+          }
+
+          if (unverifiedCandidates.length > 0) {
+            // Language-aware selection for unverified candidates
+            let unverifiedEntry = null;
+            if (resolvedPreferredLanguages.length > 0) {
+              unverifiedEntry = unverifiedCandidates.find((e) => getPreferredLanguageMatch(e.candidate, resolvedPreferredLanguages));
+            }
+            if (!unverifiedEntry) {
+              unverifiedEntry = unverifiedCandidates[0];
+            }
+
+            const { candidate, decision } = unverifiedEntry;
+            prefetchCandidate = {
+              downloadUrl: candidate.downloadUrl,
+              title: candidate.title,
+              category: categoryForType,
+              requestedEpisode,
+            };
+            prefetchNzbPayload = decision.nzbPayload;
+            // Cache unverified NZB payload too - it might work
+            cache.cacheVerifiedNzbPayload(candidate.downloadUrl, decision.nzbPayload, {
+              title: decision.title || candidate.title,
+              size: candidate.size,
+              fileName: candidate.title,
+            });
+            delete decision.nzbPayload;
+            console.log(`[PREFETCH] No verified candidates - selected unverified fallback: ${candidate.title}`);
+          }
         }
       }
 
