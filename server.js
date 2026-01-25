@@ -2402,9 +2402,12 @@ async function streamHandler(req, res) {
     if (triageCompleteForCache && shouldAttemptTriage) {
       // Collect all verified, non-blocklisted candidates for language-aware prefetch selection
       const verifiedCandidates = [];
+      let debugVerifiedWithPayload = 0;
+      let debugBlocklisted = 0;
       triageEligibleResults.forEach((candidate) => {
         const decision = triageDecisions.get(candidate.downloadUrl);
         if (decision && decision.status === 'verified' && typeof decision.nzbPayload === 'string') {
+          debugVerifiedWithPayload++;
           cache.cacheVerifiedNzbPayload(candidate.downloadUrl, decision.nzbPayload, {
             title: decision.title || candidate.title,
             size: candidate.size,
@@ -2414,12 +2417,15 @@ async function streamHandler(req, res) {
           const isBlocklisted = RELEASE_BLOCKLIST_REGEX.test(candidate.title) || REMUX_BLOCKLIST_REGEX.test(candidate.title);
           if (STREAMING_MODE !== 'native' && !isBlocklisted) {
             verifiedCandidates.push(candidate);
+          } else if (isBlocklisted) {
+            debugBlocklisted++;
           }
         }
         if (decision && decision.nzbPayload) {
           delete decision.nzbPayload;
         }
       });
+      console.log(`[PREFETCH DEBUG] First block: verifiedWithPayload=${debugVerifiedWithPayload}, blocklisted=${debugBlocklisted}, verifiedCandidates=${verifiedCandidates.length}, STREAMING_MODE=${STREAMING_MODE}`);
 
       // Language-aware prefetch: prefer candidates matching user's preferred language
       if (!prefetchCandidate && verifiedCandidates.length > 0) {
