@@ -2398,6 +2398,8 @@ async function streamHandler(req, res) {
     }
 
     if (triageCompleteForCache && shouldAttemptTriage) {
+      // Collect all verified, non-blocklisted candidates for language-aware prefetch selection
+      const verifiedCandidates = [];
       triageEligibleResults.forEach((candidate) => {
         const decision = triageDecisions.get(candidate.downloadUrl);
         if (decision && decision.status === 'verified' && typeof decision.nzbPayload === 'string') {
@@ -2406,21 +2408,43 @@ async function streamHandler(req, res) {
             size: candidate.size,
             fileName: candidate.title,
           });
-            // Skip blocklisted candidates for prefetch
-            const isBlocklisted = RELEASE_BLOCKLIST_REGEX.test(candidate.title) || REMUX_BLOCKLIST_REGEX.test(candidate.title);
-            if (!prefetchCandidate && STREAMING_MODE !== 'native' && !isBlocklisted) {
-              prefetchCandidate = {
-                downloadUrl: candidate.downloadUrl,
-                title: candidate.title,
-                category: categoryForType,
-                requestedEpisode,
-              };
-            }
+          // Skip blocklisted candidates for prefetch
+          const isBlocklisted = RELEASE_BLOCKLIST_REGEX.test(candidate.title) || REMUX_BLOCKLIST_REGEX.test(candidate.title);
+          if (STREAMING_MODE !== 'native' && !isBlocklisted) {
+            verifiedCandidates.push(candidate);
+          }
         }
         if (decision && decision.nzbPayload) {
           delete decision.nzbPayload;
         }
       });
+
+      // Language-aware prefetch: prefer candidates matching user's preferred language
+      if (!prefetchCandidate && verifiedCandidates.length > 0) {
+        // First try to find a candidate matching preferred language
+        if (resolvedPreferredLanguages.length > 0) {
+          const languageMatch = verifiedCandidates.find((c) => getPreferredLanguageMatch(c, resolvedPreferredLanguages));
+          if (languageMatch) {
+            prefetchCandidate = {
+              downloadUrl: languageMatch.downloadUrl,
+              title: languageMatch.title,
+              category: categoryForType,
+              requestedEpisode,
+            };
+            console.log(`[PREFETCH] Selected language-matched candidate: ${languageMatch.title}`);
+          }
+        }
+        // Fall back to first verified candidate if no language match
+        if (!prefetchCandidate) {
+          const fallback = verifiedCandidates[0];
+          prefetchCandidate = {
+            downloadUrl: fallback.downloadUrl,
+            title: fallback.title,
+            category: categoryForType,
+            requestedEpisode,
+          };
+        }
+      }
     } else if (triageDecisions && triageDecisions.size > 0) {
       triageDecisions.forEach((decision) => {
         if (decision && decision.nzbPayload) {
@@ -2430,7 +2454,10 @@ async function streamHandler(req, res) {
     }
 
       // If prefetch is enabled, capture first verified NZB payload even when triage cache completion criteria aren't met
+      // Uses language-aware selection: prefer candidates matching user's preferred language
       if (TRIAGE_PREFETCH_FIRST_VERIFIED && STREAMING_MODE !== 'native' && !prefetchCandidate && triageDecisions && triageDecisions.size > 0) {
+        // Collect all verified, non-blocklisted candidates
+        const earlyVerifiedCandidates = [];
         for (const candidate of triageEligibleResults) {
           const decision = triageDecisions.get(candidate.downloadUrl);
           if (decision && decision.status === 'verified' && typeof decision.nzbPayload === 'string') {
@@ -2438,21 +2465,41 @@ async function streamHandler(req, res) {
             if (RELEASE_BLOCKLIST_REGEX.test(candidate.title) || REMUX_BLOCKLIST_REGEX.test(candidate.title)) {
               continue;
             }
-            prefetchCandidate = {
-              downloadUrl: candidate.downloadUrl,
-              title: candidate.title,
-              category: categoryForType,
-              requestedEpisode,
-            };
-            prefetchNzbPayload = decision.nzbPayload;
-            cache.cacheVerifiedNzbPayload(candidate.downloadUrl, decision.nzbPayload, {
-              title: decision.title || candidate.title,
-              size: candidate.size,
-              fileName: candidate.title,
-            });
-            delete decision.nzbPayload;
-            break;
+            earlyVerifiedCandidates.push({ candidate, decision });
           }
+        }
+
+        // Language-aware selection
+        let selectedEntry = null;
+        if (earlyVerifiedCandidates.length > 0) {
+          // First try to find a candidate matching preferred language
+          if (resolvedPreferredLanguages.length > 0) {
+            selectedEntry = earlyVerifiedCandidates.find((e) => getPreferredLanguageMatch(e.candidate, resolvedPreferredLanguages));
+            if (selectedEntry) {
+              console.log(`[PREFETCH] Selected language-matched candidate (early): ${selectedEntry.candidate.title}`);
+            }
+          }
+          // Fall back to first verified candidate if no language match
+          if (!selectedEntry) {
+            selectedEntry = earlyVerifiedCandidates[0];
+          }
+        }
+
+        if (selectedEntry) {
+          const { candidate, decision } = selectedEntry;
+          prefetchCandidate = {
+            downloadUrl: candidate.downloadUrl,
+            title: candidate.title,
+            category: categoryForType,
+            requestedEpisode,
+          };
+          prefetchNzbPayload = decision.nzbPayload;
+          cache.cacheVerifiedNzbPayload(candidate.downloadUrl, decision.nzbPayload, {
+            title: decision.title || candidate.title,
+            size: candidate.size,
+            fileName: candidate.title,
+          });
+          delete decision.nzbPayload;
         }
       }
 
