@@ -106,6 +106,15 @@ function clearNzbdavStreamCache(reason = 'manual') {
   nzbdavStreamCache.clear();
 }
 
+function clearNzbdavStreamCacheEntry(cacheKey) {
+  if (nzbdavStreamCache.has(cacheKey)) {
+    nzbdavStreamCache.delete(cacheKey);
+    console.log('[CACHE] Cleared NZBDav stream cache entry', { cacheKey: cacheKey?.slice(0, 100) });
+    return true;
+  }
+  return false;
+}
+
 // Timeout pending window - how long to remember that a download might still be in progress
 const TIMEOUT_PENDING_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -223,6 +232,7 @@ function getNzbdavCacheStats() {
 module.exports = {
   cleanupNzbdavCache,
   clearNzbdavStreamCache,
+  clearNzbdavStreamCacheEntry,
   getOrCreateNzbdavStream,
   buildNzbdavCacheKey,
   // Negative cache exports

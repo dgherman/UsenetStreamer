@@ -3212,7 +3212,7 @@ async function handleNzbdavStream(req, res, internalDownloadUrl = null, internal
       }
     }
 
-    const streamData = await cache.getOrCreateNzbdavStream(cacheKey, () =>
+    let streamData = await cache.getOrCreateNzbdavStream(cacheKey, () =>
       nzbdavService.buildNzbdavStream({
         downloadUrl,
         category,
@@ -3222,6 +3222,29 @@ async function handleNzbdavStream(req, res, internalDownloadUrl = null, internal
         inlineCachedEntry: inlineEasynewsEntry,
       })
     );
+
+    // Validate cached stream data matches expected content
+    if (streamData?.viewPath && title) {
+      const normalizedTitle = normalizeReleaseTitle(title);
+      const normalizedViewPath = normalizeReleaseTitle(streamData.viewPath);
+      if (normalizedTitle && normalizedViewPath && !normalizedViewPath.includes(normalizedTitle.slice(0, 20))) {
+        console.warn('[NZBDAV CACHE] Mismatch detected! Cached viewPath does not match requested title', {
+          requestedTitle: title?.slice(0, 60),
+          cachedViewPath: streamData.viewPath?.slice(0, 80),
+          cacheKey: cacheKey?.slice(0, 100),
+        });
+        // Clear this cache entry and rebuild
+        cache.clearNzbdavStreamCacheEntry(cacheKey);
+        streamData = await nzbdavService.buildNzbdavStream({
+          downloadUrl,
+          category,
+          title,
+          requestedEpisode,
+          existingSlot: existingSlotHint,
+          inlineCachedEntry: inlineEasynewsEntry,
+        });
+      }
+    }
 
     if (prefetchedSlotHint?.nzoId) {
       prefetchedNzbdavJobs.set(downloadUrl, {
