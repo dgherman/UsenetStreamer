@@ -3017,17 +3017,17 @@ async function streamHandler(req, res) {
         });
 
         console.log('[PREFETCH DEBUG] Storing prefetch entry', {
-          downloadUrl: prefetchCandidate.downloadUrl?.slice(0, 80),
-          title: prefetchCandidate.title?.slice(0, 60),
+          downloadUrl: String(prefetchCandidate.downloadUrl || '').slice(0, 80),
+          title: String(prefetchCandidate.title || '').slice(0, 60),
         });
         prefetchedNzbdavJobs.set(prefetchCandidate.downloadUrl, { promise: jobPromise, createdAt: Date.now() });
 
         jobPromise
           .then((jobInfo) => {
             console.log('[PREFETCH DEBUG] Prefetch completed', {
-              downloadUrl: prefetchCandidate.downloadUrl?.slice(0, 80),
+              downloadUrl: String(prefetchCandidate.downloadUrl || '').slice(0, 80),
               nzoId: jobInfo.nzoId,
-              jobName: jobInfo.jobName?.slice(0, 60),
+              jobName: String(jobInfo.jobName || '').slice(0, 60),
             });
             prefetchedNzbdavJobs.set(prefetchCandidate.downloadUrl, jobInfo);
             // Also track in in-flight downloads so findMatchingQueueJob can find it
@@ -3152,11 +3152,11 @@ async function handleNzbdavStream(req, res, internalDownloadUrl = null, internal
 
     // DEBUG: Log stream request details
     console.log('[STREAM DEBUG] Request received', {
-      downloadUrl: downloadUrl?.slice(0, 80),
-      title: title?.slice(0, 60),
-      cacheKey: cacheKey?.slice(0, 100),
+      downloadUrl: String(downloadUrl || '').slice(0, 80),
+      title: String(title || '').slice(0, 60),
+      cacheKey: String(cacheKey || '').slice(0, 100),
       historyNzoId: req.query.historyNzoId,
-      historyJobName: req.query.historyJobName?.slice(0, 60),
+      historyJobName: String(req.query.historyJobName || '').slice(0, 60),
     });
 
     let existingSlotHint = req.query.historyNzoId
@@ -3173,7 +3173,7 @@ async function handleNzbdavStream(req, res, internalDownloadUrl = null, internal
       if (prefetchedSlotHint?.nzoId) {
         console.log('[STREAM DEBUG] Using prefetched slot', {
           nzoId: prefetchedSlotHint.nzoId,
-          jobName: prefetchedSlotHint.jobName?.slice(0, 60),
+          jobName: String(prefetchedSlotHint.jobName || '').slice(0, 60),
         });
         existingSlotHint = {
           nzoId: prefetchedSlotHint.nzoId,
