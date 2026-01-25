@@ -2428,6 +2428,7 @@ async function streamHandler(req, res) {
       console.log(`[PREFETCH DEBUG] First block: verifiedWithPayload=${debugVerifiedWithPayload}, blocklisted=${debugBlocklisted}, verifiedCandidates=${verifiedCandidates.length}, STREAMING_MODE=${STREAMING_MODE}`);
 
       // Language-aware prefetch: prefer candidates matching user's preferred language
+      console.log(`[PREFETCH DEBUG] Selection: prefetchCandidate=${!!prefetchCandidate}, verifiedCandidates.length=${verifiedCandidates.length}, resolvedPreferredLanguages=${JSON.stringify(resolvedPreferredLanguages)}`);
       if (!prefetchCandidate && verifiedCandidates.length > 0) {
         // First try to find a candidate matching preferred language
         if (resolvedPreferredLanguages.length > 0) {
@@ -2440,6 +2441,8 @@ async function streamHandler(req, res) {
               requestedEpisode,
             };
             console.log(`[PREFETCH] Selected language-matched candidate: ${languageMatch.title}`);
+          } else {
+            console.log(`[PREFETCH DEBUG] No language match found among ${verifiedCandidates.length} candidates`);
           }
         }
         // Fall back to first verified candidate if no language match
@@ -2451,6 +2454,7 @@ async function streamHandler(req, res) {
             category: categoryForType,
             requestedEpisode,
           };
+          console.log(`[PREFETCH] Selected fallback candidate: ${fallback.title}`);
         }
       }
     } else if (triageDecisions && triageDecisions.size > 0) {
