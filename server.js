@@ -2397,6 +2397,8 @@ async function streamHandler(req, res) {
       );
     }
 
+    console.log(`[PREFETCH DEBUG] triageCompleteForCache=${triageCompleteForCache}, shouldAttemptTriage=${shouldAttemptTriage}, triageDecisions.size=${triageDecisions?.size || 0}`);
+
     if (triageCompleteForCache && shouldAttemptTriage) {
       // Collect all verified, non-blocklisted candidates for language-aware prefetch selection
       const verifiedCandidates = [];
@@ -2446,12 +2448,14 @@ async function streamHandler(req, res) {
         }
       }
     } else if (triageDecisions && triageDecisions.size > 0) {
+      console.log(`[PREFETCH DEBUG] Entering else block, TRIAGE_PREFETCH_FIRST_VERIFIED=${TRIAGE_PREFETCH_FIRST_VERIFIED}, STREAMING_MODE=${STREAMING_MODE}, prefetchCandidate=${!!prefetchCandidate}`);
       // If prefetch is enabled, capture first verified NZB payload even when triage cache completion criteria aren't met
       // Uses language-aware selection: prefer candidates matching user's preferred language
       // NOTE: This must run BEFORE deleting nzbPayload from decisions
       if (TRIAGE_PREFETCH_FIRST_VERIFIED && STREAMING_MODE !== 'native' && !prefetchCandidate) {
         // Collect all verified, non-blocklisted candidates
         const earlyVerifiedCandidates = [];
+        console.log(`[PREFETCH DEBUG] Looking for early verified candidates...`);
         for (const candidate of triageEligibleResults) {
           const decision = triageDecisions.get(candidate.downloadUrl);
           if (decision && decision.status === 'verified' && typeof decision.nzbPayload === 'string') {
@@ -2463,6 +2467,7 @@ async function streamHandler(req, res) {
           }
         }
 
+        console.log(`[PREFETCH DEBUG] Found ${earlyVerifiedCandidates.length} early verified candidates`);
         // Language-aware selection
         let selectedEntry = null;
         if (earlyVerifiedCandidates.length > 0) {
