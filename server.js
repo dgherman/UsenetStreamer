@@ -1188,7 +1188,8 @@ async function streamHandler(req, res) {
 
           if (historyMatch) {
             console.log(`[INSTANT CACHE] Found cached entry, skipping indexer search: ${instantEntry.jobName}`);
-            const streamUrl = `${ADDON_BASE_URL}/nzb/stream?` + new URLSearchParams({
+            const tokenSegment = ADDON_SHARED_SECRET ? `/${ADDON_SHARED_SECRET}` : '';
+            const streamUrl = `${ADDON_BASE_URL}${tokenSegment}/nzb/stream?` + new URLSearchParams({
               downloadUrl: instantEntry.downloadUrl || '',
               type,
               id,
