@@ -3328,6 +3328,8 @@ function startHttpServer() {
   if (serverInstance) {
     return serverInstance;
   }
+  // Clear nzbdav stream cache on startup to prevent stale/corrupted entries
+  cache.clearNzbdavStreamCache('startup');
   serverInstance = app.listen(currentPort, SERVER_HOST, () => {
     console.log(`Addon running at http://${SERVER_HOST}:${currentPort}`);
   });
