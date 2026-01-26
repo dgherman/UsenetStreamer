@@ -1301,10 +1301,12 @@ async function streamHandler(req, res) {
             const addonBaseUrl = ADDON_BASE_URL.replace(/\/$/, '');
 
             // Use smart history matching to find ALL related items
+            // Use requireAllWords: false to allow asymmetric matching (history words in search)
+            // This handles cases where search title includes episode name but history doesn't
             const debugMatching = process.env.DEBUG_HISTORY_MATCHING === 'true';
             const matchingItems = findMatchingHistoryItems(instantEntry.jobName, historyCheck, {
-              minSimilarity: 0.8,
-              requireAllWords: true, // All search words must be in history title to avoid false matches
+              minSimilarity: 0.7,
+              requireAllWords: false, // Allow asymmetric matching for episode name variations
               debug: debugMatching,
             });
 
