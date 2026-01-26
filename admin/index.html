@@ -514,6 +514,76 @@
           </div>
         </section>
 
+        <section class="group cache-management">
+          <h3>Cache Management</h3>
+          <p class="hint">Monitor and manage various caches. Clearing caches can help resolve issues with stale data.</p>
+
+          <div class="cache-stats-grid" id="cacheStatsGrid">
+            <div class="cache-stat-card" data-cache="stream">
+              <div class="cache-stat-header">
+                <span class="cache-stat-title">Stream Response</span>
+                <span class="cache-stat-count" id="cacheStatStream">-</span>
+              </div>
+              <span class="cache-stat-hint">Search results</span>
+              <button type="button" class="secondary small" data-clear-cache="stream">Clear</button>
+            </div>
+            <div class="cache-stat-card" data-cache="nzb">
+              <div class="cache-stat-header">
+                <span class="cache-stat-title">NZB Payloads</span>
+                <span class="cache-stat-count" id="cacheStatNzb">-</span>
+              </div>
+              <span class="cache-stat-hint">Verified NZB files</span>
+              <button type="button" class="secondary small" data-clear-cache="nzb">Clear</button>
+            </div>
+            <div class="cache-stat-card" data-cache="nzbdav">
+              <div class="cache-stat-header">
+                <span class="cache-stat-title">NZBDav Streams</span>
+                <span class="cache-stat-count" id="cacheStatNzbdav">-</span>
+              </div>
+              <span class="cache-stat-hint">Ready/Pending/Failed</span>
+              <button type="button" class="secondary small" data-clear-cache="nzbdav">Clear</button>
+            </div>
+            <div class="cache-stat-card" data-cache="instant">
+              <div class="cache-stat-header">
+                <span class="cache-stat-title">Instant Playback</span>
+                <span class="cache-stat-count" id="cacheStatInstant">-</span>
+              </div>
+              <span class="cache-stat-hint">Cached movie/show mappings</span>
+              <button type="button" class="secondary small" data-clear-cache="instant">Clear</button>
+            </div>
+            <div class="cache-stat-card" data-cache="negative">
+              <div class="cache-stat-header">
+                <span class="cache-stat-title">Negative Cache</span>
+                <span class="cache-stat-count" id="cacheStatNegative">-</span>
+              </div>
+              <span class="cache-stat-hint">Failed download URLs</span>
+              <button type="button" class="secondary small" data-clear-cache="negative">Clear</button>
+            </div>
+          </div>
+
+          <div class="cache-actions">
+            <button type="button" class="secondary" id="refreshCacheStats">Refresh Stats</button>
+            <button type="button" class="danger" id="clearAllCaches">Clear All Caches</button>
+            <span class="status-message" id="cacheActionStatus"></span>
+          </div>
+
+          <details class="cache-entries-section">
+            <summary>Browse Cache Entries</summary>
+            <div class="cache-entries-controls">
+              <label>Cache Type
+                <select id="cacheEntriesType">
+                  <option value="instant">Instant Playback</option>
+                  <option value="negative">Negative Cache (Failed URLs)</option>
+                </select>
+              </label>
+              <button type="button" class="secondary" id="loadCacheEntries">Load Entries</button>
+            </div>
+            <div class="cache-entries-list" id="cacheEntriesList">
+              <p class="cache-entries-empty">Select a cache type and click "Load Entries" to view cached items.</p>
+            </div>
+          </details>
+        </section>
+
         <div class="actions">
           <button type="submit" class="primary">Save Changes</button>
           <span id="saveStatus" class="status-message"></span>

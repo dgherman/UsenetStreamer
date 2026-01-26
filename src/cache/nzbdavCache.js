@@ -88,6 +88,18 @@ function getNegativeCacheStats() {
   };
 }
 
+function getNegativeCacheEntries() {
+  cleanupNegativeCache();
+  const entries = [];
+  for (const [url, entry] of failedDownloadUrlCache.entries()) {
+    entries.push({
+      url,
+      ...entry,
+    });
+  }
+  return entries;
+}
+
 function cleanupNzbdavCache() {
   if (NZBDAV_CACHE_TTL_MS <= 0) return;
 
@@ -241,6 +253,7 @@ module.exports = {
   clearFailedDownloadUrl,
   clearAllFailedDownloadUrls,
   getNegativeCacheStats,
+  getNegativeCacheEntries,
   getNzbdavCacheStats,
   reloadNzbdavCacheConfig,
 };

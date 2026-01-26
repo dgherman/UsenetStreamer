@@ -303,6 +303,108 @@ adminApiRouter.post('/test-connections', async (req, res) => {
   }
 });
 
+// Cache management endpoints
+adminApiRouter.get('/cache/stats', (req, res) => {
+  try {
+    const stats = cache.getAllCacheStats();
+    res.json({ status: 'ok', stats });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
+adminApiRouter.get('/cache/entries', (req, res) => {
+  try {
+    const { type } = req.query;
+    let entries = [];
+
+    if (!type || type === 'instant') {
+      const instantEntries = cache.getInstantCacheEntries().map(e => ({
+        ...e,
+        cacheType: 'instant',
+      }));
+      entries = entries.concat(instantEntries);
+    }
+
+    if (!type || type === 'negative') {
+      const negativeEntries = cache.getNegativeCacheEntries().map(e => ({
+        ...e,
+        cacheType: 'negative',
+      }));
+      entries = entries.concat(negativeEntries);
+    }
+
+    res.json({ status: 'ok', entries });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
+adminApiRouter.post('/cache/clear', (req, res) => {
+  try {
+    const { type } = req.body;
+    const reason = 'admin-ui';
+
+    if (!type || type === 'all') {
+      cache.clearAllCaches(reason);
+      cache.clearInstantCache(reason);
+      res.json({ status: 'ok', message: 'All caches cleared' });
+    } else if (type === 'stream') {
+      cache.clearStreamResponseCache(reason);
+      res.json({ status: 'ok', message: 'Stream response cache cleared' });
+    } else if (type === 'nzb') {
+      cache.clearVerifiedNzbCache(reason);
+      res.json({ status: 'ok', message: 'Verified NZB cache cleared' });
+    } else if (type === 'nzbdav') {
+      cache.clearNzbdavStreamCache(reason);
+      res.json({ status: 'ok', message: 'NZBDav stream cache cleared' });
+    } else if (type === 'negative') {
+      cache.clearAllFailedDownloadUrls(reason);
+      res.json({ status: 'ok', message: 'Negative cache cleared' });
+    } else if (type === 'instant') {
+      cache.clearInstantCache(reason);
+      res.json({ status: 'ok', message: 'Instant playback cache cleared' });
+    } else {
+      res.status(400).json({ status: 'error', message: `Unknown cache type: ${type}` });
+    }
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
+adminApiRouter.delete('/cache/entry', (req, res) => {
+  try {
+    const { type, key, url } = req.body;
+
+    if (type === 'instant' && key) {
+      // Parse key format: type:id or type:id:SxEy
+      const parts = key.split(':');
+      if (parts.length >= 2) {
+        const contentType = parts[0];
+        const id = parts[1];
+        let episode = null;
+        if (parts.length >= 3) {
+          const match = parts[2].match(/S(\d+)E(\d+)/);
+          if (match) {
+            episode = { season: parseInt(match[1], 10), episode: parseInt(match[2], 10) };
+          }
+        }
+        cache.clearInstantCacheEntry(contentType, id, episode);
+        res.json({ status: 'ok', message: 'Instant cache entry deleted' });
+      } else {
+        res.status(400).json({ status: 'error', message: 'Invalid instant cache key format' });
+      }
+    } else if (type === 'negative' && url) {
+      cache.clearFailedDownloadUrl(url);
+      res.json({ status: 'ok', message: 'Negative cache entry deleted' });
+    } else {
+      res.status(400).json({ status: 'error', message: 'Invalid parameters: need type and key/url' });
+    }
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
 app.use('/admin/api', (req, res, next) => ensureSharedSecret(req, res, next), adminApiRouter);
 app.use('/admin', adminStatic);
 app.use('/:token/admin', (req, res, next) => {

@@ -1013,6 +1013,188 @@
     updateHealthPaidWarning();
   }
 
+  // Cache Management Functions
+  const cacheActionStatus = document.getElementById('cacheActionStatus');
+  const refreshCacheStatsButton = document.getElementById('refreshCacheStats');
+  const clearAllCachesButton = document.getElementById('clearAllCaches');
+  const cacheEntriesTypeSelect = document.getElementById('cacheEntriesType');
+  const loadCacheEntriesButton = document.getElementById('loadCacheEntries');
+  const cacheEntriesList = document.getElementById('cacheEntriesList');
+
+  async function loadCacheStats() {
+    try {
+      const data = await apiRequest('/admin/api/cache/stats');
+      if (data.status === 'ok' && data.stats) {
+        const stats = data.stats;
+        // Update stream cache
+        const streamEl = document.getElementById('cacheStatStream');
+        if (streamEl) streamEl.textContent = stats.stream?.entries ?? '-';
+        // Update NZB cache
+        const nzbEl = document.getElementById('cacheStatNzb');
+        if (nzbEl) nzbEl.textContent = stats.nzb?.entries ?? '-';
+        // Update NZBDav cache
+        const nzbdavEl = document.getElementById('cacheStatNzbdav');
+        if (nzbdavEl) {
+          const nzbdav = stats.nzbdav || {};
+          const byStatus = nzbdav.byStatus || {};
+          nzbdavEl.textContent = `${byStatus.ready || 0}/${byStatus.pending || 0}/${byStatus.failed || 0}`;
+        }
+        // Update instant cache
+        const instantEl = document.getElementById('cacheStatInstant');
+        if (instantEl) instantEl.textContent = stats.instant?.entries ?? '-';
+        // Update negative cache
+        const negativeEl = document.getElementById('cacheStatNegative');
+        if (negativeEl) negativeEl.textContent = stats.nzbdav?.negativeCache?.entries ?? '-';
+      }
+    } catch (error) {
+      console.error('Failed to load cache stats:', error);
+    }
+  }
+
+  async function clearCache(type) {
+    if (cacheActionStatus) cacheActionStatus.textContent = 'Clearing...';
+    try {
+      const data = await apiRequest('/admin/api/cache/clear', {
+        method: 'POST',
+        body: JSON.stringify({ type }),
+      });
+      if (cacheActionStatus) {
+        cacheActionStatus.textContent = data.message || 'Cache cleared';
+        cacheActionStatus.className = 'status-message success';
+      }
+      await loadCacheStats();
+      setTimeout(() => {
+        if (cacheActionStatus) {
+          cacheActionStatus.textContent = '';
+          cacheActionStatus.className = 'status-message';
+        }
+      }, 3000);
+    } catch (error) {
+      if (cacheActionStatus) {
+        cacheActionStatus.textContent = `Error: ${error.message}`;
+        cacheActionStatus.className = 'status-message error';
+      }
+    }
+  }
+
+  async function loadCacheEntries() {
+    if (!cacheEntriesList) return;
+    const type = cacheEntriesTypeSelect?.value || 'instant';
+    cacheEntriesList.innerHTML = '<p class="cache-entries-empty">Loading...</p>';
+
+    try {
+      const data = await apiRequest(`/admin/api/cache/entries?type=${type}`);
+      if (data.status === 'ok' && data.entries) {
+        if (data.entries.length === 0) {
+          cacheEntriesList.innerHTML = '<p class="cache-entries-empty">No entries found.</p>';
+          return;
+        }
+
+        cacheEntriesList.innerHTML = data.entries.map(entry => {
+          if (entry.cacheType === 'instant') {
+            const cachedDate = entry.cachedAt ? new Date(entry.cachedAt).toLocaleString() : 'Unknown';
+            return `
+              <div class="cache-entry-item" data-key="${escapeHtml(entry.key)}" data-type="instant">
+                <div class="cache-entry-info">
+                  <div class="cache-entry-title">${escapeHtml(entry.jobName || entry.key)}</div>
+                  <div class="cache-entry-meta">
+                    <span>Key: ${escapeHtml(entry.key)}</span>
+                    <span>Cached: ${cachedDate}</span>
+                  </div>
+                </div>
+                <div class="cache-entry-actions">
+                  <button type="button" class="secondary small danger" data-delete-entry="instant" data-entry-key="${escapeHtml(entry.key)}">Delete</button>
+                </div>
+              </div>
+            `;
+          } else if (entry.cacheType === 'negative') {
+            const failedDate = entry.failedAt ? new Date(entry.failedAt).toLocaleString() : 'Unknown';
+            const urlDisplay = entry.url.length > 80 ? entry.url.substring(0, 80) + '...' : entry.url;
+            return `
+              <div class="cache-entry-item" data-url="${escapeHtml(entry.url)}" data-type="negative">
+                <div class="cache-entry-info">
+                  <div class="cache-entry-title">${escapeHtml(urlDisplay)}</div>
+                  <div class="cache-entry-reason">Reason: ${escapeHtml(entry.failureReason || 'Unknown')}</div>
+                  <div class="cache-entry-meta">
+                    <span>Failed: ${failedDate}</span>
+                    ${entry.errorCode ? `<span>Code: ${escapeHtml(entry.errorCode)}</span>` : ''}
+                  </div>
+                </div>
+                <div class="cache-entry-actions">
+                  <button type="button" class="secondary small danger" data-delete-entry="negative" data-entry-url="${escapeHtml(entry.url)}">Delete</button>
+                </div>
+              </div>
+            `;
+          }
+          return '';
+        }).join('');
+
+        // Add delete handlers
+        cacheEntriesList.querySelectorAll('[data-delete-entry]').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const entryType = btn.dataset.deleteEntry;
+            const key = btn.dataset.entryKey;
+            const url = btn.dataset.entryUrl;
+            try {
+              await apiRequest('/admin/api/cache/entry', {
+                method: 'DELETE',
+                body: JSON.stringify({ type: entryType, key, url }),
+              });
+              btn.closest('.cache-entry-item').remove();
+              await loadCacheStats();
+            } catch (error) {
+              alert(`Failed to delete entry: ${error.message}`);
+            }
+          });
+        });
+      }
+    } catch (error) {
+      cacheEntriesList.innerHTML = `<p class="cache-entries-empty">Error: ${error.message}</p>`;
+    }
+  }
+
+  function escapeHtml(str) {
+    if (!str) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  function initCacheManagement() {
+    // Refresh stats button
+    if (refreshCacheStatsButton) {
+      refreshCacheStatsButton.addEventListener('click', loadCacheStats);
+    }
+
+    // Clear all caches button
+    if (clearAllCachesButton) {
+      clearAllCachesButton.addEventListener('click', () => {
+        if (confirm('Are you sure you want to clear all caches? This will remove cached search results, NZB data, and instant playback mappings.')) {
+          clearCache('all');
+        }
+      });
+    }
+
+    // Individual cache clear buttons
+    document.querySelectorAll('[data-clear-cache]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const cacheType = btn.dataset.clearCache;
+        clearCache(cacheType);
+      });
+    });
+
+    // Load cache entries button
+    if (loadCacheEntriesButton) {
+      loadCacheEntriesButton.addEventListener('click', loadCacheEntries);
+    }
+
+    // Load stats on init
+    loadCacheStats();
+  }
+
   async function saveConfiguration(event) {
     event.preventDefault();
     saveStatus.textContent = '';
@@ -1157,4 +1339,5 @@
   applyQualitySelectionsFromHidden();
   applyTmdbLanguageSelectionsFromHidden();
   syncSaveGuard();
+  initCacheManagement();
 })();

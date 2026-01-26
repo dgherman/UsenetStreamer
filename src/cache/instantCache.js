@@ -114,6 +114,28 @@ function clearInstantCacheEntry(type, id, requestedEpisode = null) {
   }
 }
 
+function clearInstantCache(reason = 'manual') {
+  const cache = getInstantCache();
+  const count = Object.keys(cache).length;
+  if (count > 0) {
+    console.log('[INSTANT CACHE] Cleared all entries', { reason, entries: count });
+  }
+  instantCache = {};
+  saveInstantCache();
+}
+
+function getInstantCacheEntries() {
+  const cache = getInstantCache();
+  const entries = [];
+  for (const [key, entry] of Object.entries(cache)) {
+    entries.push({
+      key,
+      ...entry,
+    });
+  }
+  return entries;
+}
+
 function getInstantCacheStats() {
   const cache = getInstantCache();
   return {
@@ -128,6 +150,8 @@ module.exports = {
   getInstantCacheEntry,
   setInstantCacheEntry,
   clearInstantCacheEntry,
+  clearInstantCache,
+  getInstantCacheEntries,
   buildInstantCacheKey,
   getInstantCacheStats,
 };
