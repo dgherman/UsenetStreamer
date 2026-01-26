@@ -2840,10 +2840,22 @@ async function streamHandler(req, res) {
         // Also check if prefetched item's nzoId is now in history (download completed)
         const prefetchedNzoId = prefetchedEntry?.nzoId;
         const prefetchedInHistory = prefetchedNzoId ? historyByNzoId.get(prefetchedNzoId) : null;
-        const isInstant = Boolean(historySlot) || Boolean(prefetchedInHistory); // Instant if in history OR prefetch completed
+        // Fallback: use smart matching if exact lookups failed (handles changed downloadUrls)
+        let smartMatchedHistory = null;
+        if (!historySlot && !prefetchedInHistory && historyByTitle.size > 0 && result.title) {
+          const smartMatches = findMatchingHistoryItems(result.title, historyByTitle, {
+            minSimilarity: 0.85, // Higher threshold for individual result matching
+            requireAllWords: false, // Don't require all words - release titles vary
+          });
+          if (smartMatches.length > 0) {
+            smartMatchedHistory = smartMatches[0].entry;
+          }
+        }
+        const isInstant = Boolean(historySlot) || Boolean(prefetchedInHistory) || Boolean(smartMatchedHistory);
         // Debug: log history matching attempts
         if (process.env.DEBUG_HISTORY_MATCHING === 'true') {
-          console.log(`[HISTORY MATCH] "${normalizedTitle}" → ${isInstant ? 'MATCH' : 'no match'}${prefetchedInHistory ? ' (via prefetch nzoId)' : ''}`);
+          const matchType = historySlot ? 'exact' : prefetchedInHistory ? 'prefetch-nzoId' : smartMatchedHistory ? 'smart' : 'none';
+          console.log(`[HISTORY MATCH] "${normalizedTitle}" → ${isInstant ? 'MATCH' : 'no match'} (${matchType})`);
         }
         const isPrefetched = Boolean(prefetchedEntry) && !isInstant;
 
