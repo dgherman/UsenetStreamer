@@ -34,7 +34,7 @@ const { ensureSharedSecret } = require('./src/middleware/auth');
 const newznabService = require('./src/services/newznab');
 const easynewsService = require('./src/services/easynews');
 const { toFiniteNumber, toPositiveInt, toBoolean, parseCommaList, parsePathList, normalizeSortMode, resolvePreferredLanguages, toSizeBytesFromGb, collectConfigValues, computeManifestUrl, stripTrailingSlashes, decodeBase64Value } = require('./src/utils/config');
-const { normalizeReleaseTitle, parseRequestedEpisode, isVideoFileName, fileMatchesEpisode, normalizeNzbdavPath, inferMimeType, normalizeIndexerToken, nzbMatchesIndexer, cleanSpecialSearchTitle } = require('./src/utils/parsers');
+const { normalizeReleaseTitle, parseRequestedEpisode, isVideoFileName, fileMatchesEpisode, normalizeNzbdavPath, inferMimeType, normalizeIndexerToken, nzbMatchesIndexer, cleanSpecialSearchTitle, findMatchingHistoryItems } = require('./src/utils/parsers');
 const { sleep, annotateNzbResult, applyMaxSizeFilter, prepareSortedResults, getPreferredLanguageMatch, getPreferredLanguageMatches, triageStatusRank, buildTriageTitleMap, prioritizeTriageCandidates, triageDecisionsMatchStatuses, sanitizeDecisionForCache, serializeFinalNzbResults, restoreFinalNzbResults, safeStat } = require('./src/utils/helpers');
 const indexerService = require('./src/services/indexer');
 const nzbdavService = require('./src/services/nzbdav');
@@ -1298,66 +1298,41 @@ async function streamHandler(req, res) {
             const tokenSegment = ADDON_SHARED_SECRET ? `/${ADDON_SHARED_SECRET}` : '';
             const addonBaseUrl = ADDON_BASE_URL.replace(/\/$/, '');
 
-            // Build streams for ALL matching history items, not just the cached one
-            const instantStreams = [];
-            const matchedNormalizedTitles = new Set();
+            // Use smart history matching to find ALL related items
+            const debugMatching = process.env.DEBUG_HISTORY_MATCHING === 'true';
+            const matchingItems = findMatchingHistoryItems(instantEntry.jobName, historyCheck, {
+              minSimilarity: 0.5, // Lower threshold to catch releases with different naming
+              requireAllWords: false,
+              debug: debugMatching,
+            });
 
-            // Extract title keywords from the cached entry to find related history items
-            // Pattern: extract words before year (e.g., "28 Days Later" from "28.Days.Later.2002...")
-            const yearMatch = instantEntry.jobName.match(/[.\-_\s]((?:19|20)\d{2})[.\-_\s]/);
-            const yearStr = yearMatch ? yearMatch[1] : null;
-            let titlePart = instantEntry.jobName;
-            if (yearStr) {
-              const yearIndex = titlePart.indexOf(yearStr);
-              if (yearIndex > 0) {
-                titlePart = titlePart.substring(0, yearIndex);
-              }
+            if (debugMatching) {
+              console.log(`[INSTANT CACHE DEBUG] Smart matching found ${matchingItems.length} items for "${instantEntry.jobName}"`);
             }
-            // Get all words, including short ones like "28"
-            const allTitleWords = titlePart
-              .replace(/[.\-_]+/g, ' ')
-              .toLowerCase()
-              .split(/\s+/)
-              .filter((w) => w.length > 0);
-            // Use first 3-4 significant words as core keywords (the main title)
-            // This avoids including subtitle translations like "28 giorni dopo"
-            const titleKeywords = allTitleWords.slice(0, 4).filter((w) => w.length > 1);
 
-            console.log(`[INSTANT CACHE DEBUG] Extracted keywords: [${titleKeywords.join(', ')}] from "${titlePart}"`);
+            // Build streams for ALL matching history items
+            const instantStreams = [];
+            for (const match of matchingItems) {
+              const historyEntry = match.entry;
+              const streamUrl = `${addonBaseUrl}${tokenSegment}/nzb/stream?` + new URLSearchParams({
+                downloadUrl: historyEntry.nzoId === historyMatch.nzoId ? (instantEntry.downloadUrl || '') : '',
+                type,
+                id,
+                title: historyEntry.jobName,
+                historyNzoId: historyEntry.nzoId,
+                historyJobName: historyEntry.jobName,
+                historyCategory: historyEntry.category || categoryForInstant,
+              }).toString();
 
-            // Find all history items matching the title keywords
-            for (const [normalizedHistoryTitle, historyEntry] of historyCheck.entries()) {
-              const historyLower = normalizedHistoryTitle.toLowerCase();
-              // Require all core keywords to match (year is optional - some releases don't include it)
-              const keywordsMatch = titleKeywords.length > 0 && titleKeywords.every((kw) => historyLower.includes(kw));
-
-              if (process.env.DEBUG_HISTORY_MATCHING === 'true') {
-                console.log(`[INSTANT CACHE DEBUG] Checking "${normalizedHistoryTitle}": keywords=${keywordsMatch}`);
-              }
-
-              if (keywordsMatch) {
-                matchedNormalizedTitles.add(normalizedHistoryTitle);
-
-                const streamUrl = `${addonBaseUrl}${tokenSegment}/nzb/stream?` + new URLSearchParams({
-                  downloadUrl: historyEntry.nzoId === historyMatch.nzoId ? (instantEntry.downloadUrl || '') : '',
-                  type,
-                  id,
-                  title: historyEntry.jobName,
-                  historyNzoId: historyEntry.nzoId,
-                  historyJobName: historyEntry.jobName,
-                  historyCategory: historyEntry.category || categoryForInstant,
-                }).toString();
-
-                instantStreams.push({
-                  name: `${ADDON_NAME || 'UsenetStreamer'}\n⚡ Instant`,
-                  title: historyEntry.jobName,
-                  url: streamUrl,
-                  behaviorHints: {
-                    bingeGroup: `usenetstreamer-instant-${baseIdentifier}`,
-                    notWebReady: true,
-                  },
-                });
-              }
+              instantStreams.push({
+                name: `${ADDON_NAME || 'UsenetStreamer'}\n⚡ Instant`,
+                title: historyEntry.jobName,
+                url: streamUrl,
+                behaviorHints: {
+                  bingeGroup: `usenetstreamer-instant-${baseIdentifier}`,
+                  notWebReady: true,
+                },
+              });
             }
 
             if (instantStreams.length > 0) {
@@ -3150,51 +3125,58 @@ async function streamHandler(req, res) {
       const matchedNormalizedTitles = new Set(
         instantStreams.map((s) => normalizeReleaseTitle(s.meta?.originalTitle)).filter(Boolean)
       );
-      const titleKeywords = movieTitle.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
-      const yearStr = releaseYear ? String(releaseYear) : null;
 
-      for (const [normalizedHistoryTitle, historyEntry] of historyByTitle.entries()) {
+      // Build a search title from movieTitle + year for smart matching
+      const searchTitle = releaseYear ? `${movieTitle} ${releaseYear}` : movieTitle;
+      const debugMatching = process.env.DEBUG_HISTORY_MATCHING === 'true';
+
+      // Use smart history matching to find related items
+      const matchingItems = findMatchingHistoryItems(searchTitle, historyByTitle, {
+        minSimilarity: 0.5,
+        requireAllWords: false,
+        debug: debugMatching,
+      });
+
+      for (const match of matchingItems) {
+        const historyEntry = match.entry;
+        const normalizedHistoryTitle = normalizeReleaseTitle(historyEntry.jobName);
+
         // Skip if already matched by an indexer result
         if (matchedNormalizedTitles.has(normalizedHistoryTitle)) continue;
 
-        // Check if history item matches current content by keywords (year is optional)
-        const historyLower = normalizedHistoryTitle.toLowerCase();
-        const keywordsMatch = titleKeywords.length > 0 && titleKeywords.every((kw) => historyLower.includes(kw));
+        // Create an instant stream for this history item
+        const tokenSegment = ADDON_SHARED_SECRET ? `/${ADDON_SHARED_SECRET}` : '';
+        const historyParams = new URLSearchParams({
+          type,
+          id,
+          title: historyEntry.jobName,
+          historyNzoId: historyEntry.nzoId,
+          historyJobName: historyEntry.jobName,
+          historyCategory: historyEntry.category || categoryForType,
+        });
+        const historyStreamUrl = `${addonBaseUrl}${tokenSegment}/nzb/stream?${historyParams.toString()}`;
 
-        if (keywordsMatch) {
-          // Create an instant stream for this history item
-          const tokenSegment = ADDON_SHARED_SECRET ? `/${ADDON_SHARED_SECRET}` : '';
-          const historyParams = new URLSearchParams({
-            type,
-            id,
-            title: historyEntry.jobName,
-            historyNzoId: historyEntry.nzoId,
-            historyJobName: historyEntry.jobName,
-            historyCategory: historyEntry.category || categoryForType,
-          });
-          const historyStreamUrl = `${addonBaseUrl}${tokenSegment}/nzb/stream?${historyParams.toString()}`;
+        const historyStream = {
+          title: `${historyEntry.jobName}\n⚡ Instant • History\n${historyEntry.category || 'nzbdav'}`,
+          name: ADDON_NAME || DEFAULT_ADDON_NAME,
+          url: historyStreamUrl,
+          behaviorHints: {
+            notWebReady: true,
+            cached: true,
+            cachedFromHistory: true,
+          },
+          meta: {
+            originalTitle: historyEntry.jobName,
+            type: 'nzb',
+            cached: true,
+            cachedFromHistory: true,
+            historyOnly: true, // Flag: this stream came from history, not indexer
+            matchSimilarity: match.similarity, // Include match score for debugging
+          }
+        };
 
-          const historyStream = {
-            title: `${historyEntry.jobName}\n⚡ Instant • History\n${historyEntry.category || 'nzbdav'}`,
-            name: ADDON_NAME || DEFAULT_ADDON_NAME,
-            url: historyStreamUrl,
-            behaviorHints: {
-              notWebReady: true,
-              cached: true,
-              cachedFromHistory: true,
-            },
-            meta: {
-              originalTitle: historyEntry.jobName,
-              type: 'nzb',
-              cached: true,
-              cachedFromHistory: true,
-              historyOnly: true, // Flag: this stream came from history, not indexer
-            }
-          };
-
-          instantStreams.push(historyStream);
-          console.log(`[INSTANT] Added history-only stream: ${historyEntry.jobName}`);
-        }
+        instantStreams.push(historyStream);
+        console.log(`[INSTANT] Added history-only stream (similarity=${match.similarity.toFixed(2)}): ${historyEntry.jobName}`);
       }
     }
 

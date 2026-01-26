@@ -102,20 +102,21 @@ It does NOT help with slow downloads where Stremio gives up waiting.
 
 ---
 
-### 5. Smarter history matching
+### 5. Smarter history matching - IMPLEMENTED
 
-**Current behavior:** History lookup uses exact normalized title match to detect already-downloaded content.
+**Status:** Implemented
 
-**Proposed:** Use fuzzy matching or token-based similarity for better detection.
+**Behavior:** History matching now uses smart token-based similarity instead of exact title matching. This finds all related downloads even when release names differ (e.g., "28 Days Later DVDrip" vs "28 Days Later 2002 1080p BluRay").
 
-**Implementation:**
-- Extract key tokens from title (movie name, year, quality, codec)
-- Match on core tokens (name + year) with optional quality match
-- Use Levenshtein distance or Jaccard similarity for fuzzy matching
-- Configurable similarity threshold
-- Handle edge cases: different release groups, repack vs original
+**Implementation details:**
+- `parseReleaseTokens()` extracts structured components: title words, year, resolution, source, codec, group
+- `calculateReleaseSimilarity()` computes Jaccard similarity between title word sets
+- `findMatchingHistoryItems()` finds all history items above similarity threshold
+- Configurable via `minSimilarity` (default 0.5) and `requireAllWords` options
+- Handles releases without year, different quality markers, various naming conventions
+- Debug with `DEBUG_HISTORY_MATCHING=true` to see match scores
 
-**Benefit:** Better detection of already-downloaded content even when release names differ slightly, reducing duplicate downloads.
+**Benefit:** Better detection of already-downloaded content even when release names differ significantly, reducing duplicate downloads and ensuring all instant streams are shown.
 
 ---
 
@@ -210,4 +211,4 @@ NZB_BLOCKLIST_PATTERNS=remux,/\.iso$/i,bdmv,disc
 | 6. Admin dashboard stats | Low | Medium | P2 | DONE |
 | 7. Configurable blocklist | Low | Low | P3 | |
 | 8. Health check endpoint | Low | Low | P3 | |
-| 5. Smarter history matching | Medium | High | P4 | |
+| 5. Smarter history matching | Medium | High | P4 | DONE |
