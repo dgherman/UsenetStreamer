@@ -2852,8 +2852,9 @@ async function streamHandler(req, res) {
         // Fallback: use smart matching if exact lookups failed (handles changed downloadUrls)
         // Movies: use strict matching to avoid false positives (e.g., "Toy Story 5" → "Toy Story 1995")
         // Series: use asymmetric matching to handle episode name variations
+        // IMPORTANT: Don't use smart matching if this result was prefetched - it should wait for its specific nzoId
         let smartMatchedHistory = null;
-        if (!historySlot && !prefetchedInHistory && historyByTitle.size > 0 && result.title) {
+        if (!historySlot && !prefetchedInHistory && !prefetchedEntry && historyByTitle.size > 0 && result.title) {
           const isSeriesType = type === 'series';
           const smartMatches = findMatchingHistoryItems(result.title, historyByTitle, {
             minSimilarity: isSeriesType ? 0.75 : 0.85,
