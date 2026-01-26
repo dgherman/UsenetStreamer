@@ -366,7 +366,9 @@ async function triageAndRank(nzbResults, options = {}) {
         const firstDecision = summary?.decisions?.[0];
         if (firstDecision) {
           const summarized = summarizeDecision(firstDecision);
-          if (captureNzbPayloads && summarized.status === 'verified') {
+          // Capture nzbPayload for verified AND unverified candidates
+          // Unverified candidates need it for fallback prefetch when no verified exist
+          if (captureNzbPayloads && (summarized.status === 'verified' || summarized.status === 'unverified')) {
             summarized.nzbPayload = nzbPayload;
           }
           decisionMap.set(downloadUrl, attachMetadata(downloadUrl, summarized));
