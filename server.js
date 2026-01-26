@@ -40,6 +40,7 @@ const indexerService = require('./src/services/indexer');
 const nzbdavService = require('./src/services/nzbdav');
 const specialMetadata = require('./src/services/specialMetadata');
 const tmdbService = require('./src/services/tmdb');
+const stats = require('./src/stats');
 
 const app = express();
 let currentPort = Number(process.env.PORT || 7000);
@@ -413,6 +414,25 @@ adminApiRouter.delete('/cache/entry', (req, res) => {
     } else {
       res.status(400).json({ status: 'error', message: 'Invalid parameters: need type and key/url' });
     }
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
+// Operational stats endpoints
+adminApiRouter.get('/stats', (req, res) => {
+  try {
+    const operationalStats = stats.getStats();
+    res.json({ status: 'ok', stats: operationalStats });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
+adminApiRouter.post('/stats/reset', (req, res) => {
+  try {
+    stats.resetStats();
+    res.json({ status: 'ok', message: 'Stats reset successfully' });
   } catch (error) {
     res.status(500).json({ status: 'error', message: error.message });
   }
@@ -1232,6 +1252,7 @@ async function streamHandler(req, res) {
   const requestStartTs = Date.now();
   const { type, id } = req.params;
   console.log(`[REQUEST] Received request for ${type} ID: ${id}`, { ts: new Date(requestStartTs).toISOString() });
+  stats.trackRequest(type);
   let triagePrewarmPromise = null;
 
   let baseIdentifier = id;
@@ -1306,6 +1327,7 @@ async function streamHandler(req, res) {
           const historyMatch = normalizedTitle ? historyCheck.get(normalizedTitle) : null;
 
           if (historyMatch) {
+            stats.trackInstantHit();
             console.log(`[INSTANT CACHE] Found cached entry, skipping indexer search: ${instantEntry.jobName}`);
             console.log(`[INSTANT CACHE DEBUG] History has ${historyCheck.size} items for category: ${categoryForInstant}`);
             const tokenSegment = ADDON_SHARED_SECRET ? `/${ADDON_SHARED_SECRET}` : '';
@@ -1358,6 +1380,7 @@ async function streamHandler(req, res) {
             }
 
             if (instantStreams.length > 0) {
+              stats.trackInstantHistoryHit(instantStreams.length);
               console.log(`[INSTANT CACHE] Returning ${instantStreams.length} instant stream(s) from history`);
               res.json({ streams: instantStreams });
               return;
@@ -1395,6 +1418,11 @@ async function streamHandler(req, res) {
           console.warn(`[INSTANT CACHE] Error checking instant cache: ${instantError.message}`);
         }
       }
+    }
+
+    // If we reach here, instant cache didn't return early - track as miss
+    if (STREAMING_MODE !== 'native') {
+      stats.trackInstantMiss();
     }
 
     const streamCacheKey = STREAM_CACHE_MAX_ENTRIES > 0
@@ -2543,6 +2571,7 @@ async function streamHandler(req, res) {
             triageDecisions.forEach((decision, downloadUrl) => {
               const status = decision?.status || 'unknown';
               statusCounts[status] = (statusCounts[status] || 0) + 1;
+              stats.trackTriageResult(status);
               if (loggedSamples < sampleLimit) {
                 console.log('[NZB TRIAGE] Decision sample', {
                   status,
@@ -2822,8 +2851,19 @@ async function streamHandler(req, res) {
 
     finalNzbResults.forEach((result) => {
         // Skip releases matching blocklist (ISO, sample, exe, remux, adult, etc.)
-        if (result.title && (RELEASE_BLOCKLIST_REGEX.test(result.title) || REMUX_BLOCKLIST_REGEX.test(result.title) || ADULT_BLOCKLIST_REGEX.test(result.title))) {
-          return;
+        if (result.title) {
+          if (RELEASE_BLOCKLIST_REGEX.test(result.title)) {
+            stats.trackBlocklistHit('iso');
+            return;
+          }
+          if (REMUX_BLOCKLIST_REGEX.test(result.title)) {
+            stats.trackBlocklistHit('remux');
+            return;
+          }
+          if (ADULT_BLOCKLIST_REGEX.test(result.title)) {
+            stats.trackBlocklistHit('adult');
+            return;
+          }
         }
 
         const sizeInGB = result.size ? (result.size / 1073741824).toFixed(2) : null;
@@ -3372,6 +3412,7 @@ async function streamHandler(req, res) {
           title: String(prefetchCandidate.title || '').slice(0, 60),
         });
         prefetchedNzbdavJobs.set(prefetchCandidate.downloadUrl, { promise: jobPromise, createdAt: Date.now() });
+        stats.trackPrefetchStarted();
         prefetchedCount++;
 
         // Closure to capture prefetchCandidate for the promise handlers
@@ -3536,6 +3577,7 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
     if (!existingSlotHint) {
       prefetchedSlotHint = await resolvePrefetchedNzbdavJob(downloadUrl);
       if (prefetchedSlotHint?.nzoId) {
+        stats.trackPrefetchHit();
         console.log('[STREAM DEBUG] Using prefetched slot', {
           nzoId: prefetchedSlotHint.nzoId,
           jobName: String(prefetchedSlotHint.jobName || '').slice(0, 60),
@@ -3545,6 +3587,9 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
           jobName: prefetchedSlotHint.jobName,
           category: prefetchedSlotHint.category,
         };
+      } else if (downloadUrl) {
+        // No prefetched job and no history slot - new download will be needed
+        stats.trackPrefetchMiss();
       }
     }
 

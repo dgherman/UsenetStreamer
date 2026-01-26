@@ -122,21 +122,25 @@ It does NOT help with slow downloads where Stremio gives up waiting.
 
 ## Quality of Life
 
-### 6. Admin dashboard stats
+### 6. Admin dashboard stats - IMPLEMENTED
 
-**Current behavior:** Limited visibility into system performance and cache effectiveness.
+**Status:** Implemented
 
-**Proposed:** Add statistics to the admin dashboard showing operational metrics.
+**Behavior:** Admin dashboard now displays operational statistics including request counts, instant cache hit rate, prefetch hit rate, triage success rate, and blocklist filter counts.
 
-**Implementation:**
-- Track and expose metrics:
-  - Prefetch hit rate (prefetched job used vs. new download queued)
-  - Instant cache hit rate
-  - Triage success rate (verified vs. failed)
-  - Average download time
-  - Blocklist filter counts
-- Add `/admin/stats` endpoint or section in existing admin page
-- Optional: time-series data for charts (last 24h, 7d)
+**Implementation details:**
+- Created `src/stats/index.js` module for tracking operational metrics
+- Added `/admin/api/stats` endpoint to retrieve current statistics
+- Added `/admin/api/stats/reset` endpoint to reset statistics
+- Tracks the following metrics:
+  - **Uptime:** Server running time since start
+  - **Requests:** Total requests, split by movies/series
+  - **Instant Cache:** Hit rate (cached entry found vs. indexer search required)
+  - **Prefetch:** Hit rate (prefetched download used vs. new download started)
+  - **Triage:** Success rate (verified vs. blocked/error)
+  - **Blocklist:** Filter counts by type (remux, ISO/IMG/BIN, adult content)
+- UI displays stats with color-coded rates (green for good, yellow for warning)
+- Stats are in-memory and reset on server restart
 
 **Benefit:** Visibility into system health, helps identify issues and tune configuration.
 

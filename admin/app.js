@@ -1195,6 +1195,139 @@
     loadCacheStats();
   }
 
+  // Operational Statistics Functions
+  const statsActionStatus = document.getElementById('statsActionStatus');
+  const refreshOperationalStatsButton = document.getElementById('refreshOperationalStats');
+  const resetOperationalStatsButton = document.getElementById('resetOperationalStats');
+
+  function formatUptime(hours) {
+    if (hours < 1) {
+      return `${Math.round(hours * 60)}m`;
+    } else if (hours < 24) {
+      return `${hours.toFixed(1)}h`;
+    } else {
+      const days = Math.floor(hours / 24);
+      const remainingHours = Math.round(hours % 24);
+      return `${days}d ${remainingHours}h`;
+    }
+  }
+
+  function formatRate(rate) {
+    if (rate === 0) return '0%';
+    return `${rate}%`;
+  }
+
+  async function loadOperationalStats() {
+    try {
+      const data = await apiRequest('/admin/api/stats');
+      if (data.status === 'ok' && data.stats) {
+        const s = data.stats;
+
+        // Uptime
+        const uptimeEl = document.getElementById('statUptime');
+        if (uptimeEl) uptimeEl.textContent = formatUptime(s.uptime?.uptimeHours || 0);
+
+        // Requests
+        const requestsEl = document.getElementById('statRequests');
+        if (requestsEl) requestsEl.textContent = s.requests?.total || 0;
+        const requestsBreakdownEl = document.getElementById('statRequestsBreakdown');
+        if (requestsBreakdownEl) {
+          requestsBreakdownEl.textContent = `Movies: ${s.requests?.movies || 0} / Series: ${s.requests?.series || 0}`;
+        }
+
+        // Instant Cache
+        const instantRateEl = document.getElementById('statInstantRate');
+        if (instantRateEl) {
+          const rate = s.instant?.hitRate || 0;
+          instantRateEl.textContent = formatRate(rate);
+          instantRateEl.className = 'stat-value' + (rate >= 50 ? ' good' : rate >= 20 ? '' : ' warning');
+        }
+        const instantHintsEl = document.getElementById('statInstantHints');
+        if (instantHintsEl) {
+          instantHintsEl.textContent = `Hits: ${s.instant?.hits || 0} / Misses: ${s.instant?.misses || 0}`;
+        }
+
+        // Prefetch
+        const prefetchRateEl = document.getElementById('statPrefetchRate');
+        if (prefetchRateEl) {
+          const rate = s.prefetch?.hitRate || 0;
+          prefetchRateEl.textContent = formatRate(rate);
+          prefetchRateEl.className = 'stat-value' + (rate >= 50 ? ' good' : rate >= 20 ? '' : ' warning');
+        }
+        const prefetchHintsEl = document.getElementById('statPrefetchHints');
+        if (prefetchHintsEl) {
+          prefetchHintsEl.textContent = `Hits: ${s.prefetch?.hits || 0} / Misses: ${s.prefetch?.misses || 0} / Started: ${s.prefetch?.started || 0}`;
+        }
+
+        // Triage
+        const triageRateEl = document.getElementById('statTriageRate');
+        if (triageRateEl) {
+          const rate = s.triage?.successRate || 0;
+          triageRateEl.textContent = formatRate(rate);
+          triageRateEl.className = 'stat-value' + (rate >= 70 ? ' good' : rate >= 40 ? '' : ' warning');
+        }
+        const triageHintsEl = document.getElementById('statTriageHints');
+        if (triageHintsEl) {
+          triageHintsEl.textContent = `Verified: ${s.triage?.verified || 0} / Blocked: ${s.triage?.blocked || 0} / Errors: ${s.triage?.errors || 0}`;
+        }
+
+        // Blocklist
+        const blocklistTotalEl = document.getElementById('statBlocklistTotal');
+        if (blocklistTotalEl) blocklistTotalEl.textContent = s.blocklist?.total || 0;
+        const blocklistHintsEl = document.getElementById('statBlocklistHints');
+        if (blocklistHintsEl) {
+          blocklistHintsEl.textContent = `Remux: ${s.blocklist?.remux || 0} / ISO: ${s.blocklist?.iso || 0} / Adult: ${s.blocklist?.adult || 0}`;
+        }
+      }
+    } catch (error) {
+      console.error('Failed to load operational stats:', error);
+    }
+  }
+
+  async function resetOperationalStats() {
+    if (statsActionStatus) statsActionStatus.textContent = 'Resetting...';
+    try {
+      const data = await apiRequest('/admin/api/stats/reset', {
+        method: 'POST',
+      });
+      if (statsActionStatus) {
+        statsActionStatus.textContent = data.message || 'Stats reset';
+        statsActionStatus.className = 'status-message success';
+      }
+      await loadOperationalStats();
+      setTimeout(() => {
+        if (statsActionStatus) {
+          statsActionStatus.textContent = '';
+          statsActionStatus.className = 'status-message';
+        }
+      }, 3000);
+    } catch (error) {
+      if (statsActionStatus) {
+        statsActionStatus.textContent = `Error: ${error.message}`;
+        statsActionStatus.className = 'status-message error';
+      }
+    }
+  }
+
+  function initOperationalStats() {
+    // Refresh stats button
+    if (refreshOperationalStatsButton) {
+      refreshOperationalStatsButton.addEventListener('click', loadOperationalStats);
+    }
+
+    // Reset stats button
+    if (resetOperationalStatsButton) {
+      resetOperationalStatsButton.addEventListener('click', () => {
+        if (confirm('Are you sure you want to reset operational statistics? This will clear all tracked metrics.')) {
+          resetOperationalStats();
+        }
+      });
+    }
+
+    // Load stats on init
+    loadOperationalStats();
+  }
+
   async function saveConfiguration(event) {
     event.preventDefault();
     saveStatus.textContent = '';
@@ -1340,4 +1473,5 @@
   applyTmdbLanguageSelectionsFromHidden();
   syncSaveGuard();
   initCacheManagement();
+  initOperationalStats();
 })();

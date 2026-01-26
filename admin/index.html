@@ -514,6 +514,62 @@
           </div>
         </section>
 
+        <section class="group operational-stats">
+          <h3>Operational Statistics</h3>
+          <p class="hint">Monitor system performance and efficiency metrics since server start.</p>
+
+          <div class="stats-grid" id="operationalStatsGrid">
+            <div class="stat-card" data-stat="uptime">
+              <div class="stat-header">
+                <span class="stat-title">Uptime</span>
+                <span class="stat-value" id="statUptime">-</span>
+              </div>
+              <span class="stat-hint">Server running time</span>
+            </div>
+            <div class="stat-card" data-stat="requests">
+              <div class="stat-header">
+                <span class="stat-title">Requests</span>
+                <span class="stat-value" id="statRequests">-</span>
+              </div>
+              <span class="stat-hint" id="statRequestsBreakdown">Movies: - / Series: -</span>
+            </div>
+            <div class="stat-card" data-stat="instant">
+              <div class="stat-header">
+                <span class="stat-title">Instant Cache</span>
+                <span class="stat-value" id="statInstantRate">-</span>
+              </div>
+              <span class="stat-hint" id="statInstantHints">Hits: - / Misses: -</span>
+            </div>
+            <div class="stat-card" data-stat="prefetch">
+              <div class="stat-header">
+                <span class="stat-title">Prefetch</span>
+                <span class="stat-value" id="statPrefetchRate">-</span>
+              </div>
+              <span class="stat-hint" id="statPrefetchHints">Hits: - / Misses: -</span>
+            </div>
+            <div class="stat-card" data-stat="triage">
+              <div class="stat-header">
+                <span class="stat-title">Triage Success</span>
+                <span class="stat-value" id="statTriageRate">-</span>
+              </div>
+              <span class="stat-hint" id="statTriageHints">Verified: - / Blocked: -</span>
+            </div>
+            <div class="stat-card" data-stat="blocklist">
+              <div class="stat-header">
+                <span class="stat-title">Blocklist</span>
+                <span class="stat-value" id="statBlocklistTotal">-</span>
+              </div>
+              <span class="stat-hint" id="statBlocklistHints">Remux: - / ISO: - / Adult: -</span>
+            </div>
+          </div>
+
+          <div class="stats-actions">
+            <button type="button" class="secondary" id="refreshOperationalStats">Refresh Stats</button>
+            <button type="button" class="danger" id="resetOperationalStats">Reset Stats</button>
+            <span class="status-message" id="statsActionStatus"></span>
+          </div>
+        </section>
+
         <section class="group cache-management">
           <h3>Cache Management</h3>
           <p class="hint">Monitor and manage various caches. Clearing caches can help resolve issues with stale data.</p>
