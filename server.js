@@ -3390,8 +3390,10 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
   const allFallbackUrls = fallbackUrlsRaw ? fallbackUrlsRaw.split('|').filter(Boolean) : [];
   const maxFallbackAttempts = 3;
 
-  if (!downloadUrl) {
-    res.status(400).json({ error: 'downloadUrl query parameter is required' });
+  // Allow requests with either downloadUrl OR historyNzoId (for history-only streams)
+  const historyNzoId = req.query.historyNzoId;
+  if (!downloadUrl && !historyNzoId) {
+    res.status(400).json({ error: 'downloadUrl or historyNzoId query parameter is required' });
     return;
   }
 
@@ -3429,14 +3431,16 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
   try {
     const category = nzbdavService.getNzbdavCategory(type);
     const requestedEpisode = parseRequestedEpisode(type, id, req.query || {});
-    const cacheKey = nzbdavService.buildNzbdavCacheKey(downloadUrl, category, requestedEpisode);
+    // For history-only streams, use historyNzoId as the cache key identifier
+    const cacheKeyIdentifier = downloadUrl || `history:${historyNzoId}`;
+    const cacheKey = nzbdavService.buildNzbdavCacheKey(cacheKeyIdentifier, category, requestedEpisode);
 
     // DEBUG: Log stream request details
     console.log('[STREAM DEBUG] Request received', {
       downloadUrl: String(downloadUrl || '').slice(0, 80),
       title: String(title || '').slice(0, 60),
       cacheKey: String(cacheKey || '').slice(0, 100),
-      historyNzoId: req.query.historyNzoId,
+      historyNzoId: historyNzoId || undefined,
       historyJobName: String(req.query.historyJobName || '').slice(0, 60),
     });
 
