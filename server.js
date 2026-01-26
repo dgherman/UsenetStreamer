@@ -1312,17 +1312,28 @@ async function streamHandler(req, res) {
                 titlePart = titlePart.substring(0, yearIndex);
               }
             }
-            const titleKeywords = titlePart
+            // Get all words, including short ones like "28"
+            const allTitleWords = titlePart
               .replace(/[.\-_]+/g, ' ')
               .toLowerCase()
               .split(/\s+/)
-              .filter((w) => w.length > 2);
+              .filter((w) => w.length > 0);
+            // Use first 3-4 significant words as core keywords (the main title)
+            // This avoids including subtitle translations like "28 giorni dopo"
+            const titleKeywords = allTitleWords.slice(0, 4).filter((w) => w.length > 1);
+
+            console.log(`[INSTANT CACHE DEBUG] Extracted keywords: [${titleKeywords.join(', ')}] from "${titlePart}"`);
 
             // Find all history items matching the title keywords
             for (const [normalizedHistoryTitle, historyEntry] of historyCheck.entries()) {
               const historyLower = normalizedHistoryTitle.toLowerCase();
+              // Require all core keywords to match
               const keywordsMatch = titleKeywords.length > 0 && titleKeywords.every((kw) => historyLower.includes(kw));
               const yearMatches = !yearStr || historyLower.includes(yearStr);
+
+              if (process.env.DEBUG_HISTORY_MATCHING === 'true') {
+                console.log(`[INSTANT CACHE DEBUG] Checking "${normalizedHistoryTitle}": keywords=${keywordsMatch}, year=${yearMatches}`);
+              }
 
               if (keywordsMatch && yearMatches) {
                 matchedNormalizedTitles.add(normalizedHistoryTitle);
