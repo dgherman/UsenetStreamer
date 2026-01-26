@@ -1295,7 +1295,68 @@ async function streamHandler(req, res) {
           if (historyMatch) {
             console.log(`[INSTANT CACHE] Found cached entry, skipping indexer search: ${instantEntry.jobName}`);
             const tokenSegment = ADDON_SHARED_SECRET ? `/${ADDON_SHARED_SECRET}` : '';
-            const streamUrl = `${ADDON_BASE_URL}${tokenSegment}/nzb/stream?` + new URLSearchParams({
+            const addonBaseUrl = ADDON_BASE_URL.replace(/\/$/, '');
+
+            // Build streams for ALL matching history items, not just the cached one
+            const instantStreams = [];
+            const matchedNormalizedTitles = new Set();
+
+            // Extract title keywords from the cached entry to find related history items
+            // Pattern: extract words before year (e.g., "28 Days Later" from "28.Days.Later.2002...")
+            const yearMatch = instantEntry.jobName.match(/[.\-_\s]((?:19|20)\d{2})[.\-_\s]/);
+            const yearStr = yearMatch ? yearMatch[1] : null;
+            let titlePart = instantEntry.jobName;
+            if (yearStr) {
+              const yearIndex = titlePart.indexOf(yearStr);
+              if (yearIndex > 0) {
+                titlePart = titlePart.substring(0, yearIndex);
+              }
+            }
+            const titleKeywords = titlePart
+              .replace(/[.\-_]+/g, ' ')
+              .toLowerCase()
+              .split(/\s+/)
+              .filter((w) => w.length > 2);
+
+            // Find all history items matching the title keywords
+            for (const [normalizedHistoryTitle, historyEntry] of historyCheck.entries()) {
+              const historyLower = normalizedHistoryTitle.toLowerCase();
+              const keywordsMatch = titleKeywords.length > 0 && titleKeywords.every((kw) => historyLower.includes(kw));
+              const yearMatches = !yearStr || historyLower.includes(yearStr);
+
+              if (keywordsMatch && yearMatches) {
+                matchedNormalizedTitles.add(normalizedHistoryTitle);
+
+                const streamUrl = `${addonBaseUrl}${tokenSegment}/nzb/stream?` + new URLSearchParams({
+                  downloadUrl: historyEntry.nzoId === historyMatch.nzoId ? (instantEntry.downloadUrl || '') : '',
+                  type,
+                  id,
+                  title: historyEntry.jobName,
+                  historyNzoId: historyEntry.nzoId,
+                  historyJobName: historyEntry.jobName,
+                  historyCategory: historyEntry.category || categoryForInstant,
+                }).toString();
+
+                instantStreams.push({
+                  name: `${ADDON_NAME || 'UsenetStreamer'}\n⚡ Instant`,
+                  title: historyEntry.jobName,
+                  url: streamUrl,
+                  behaviorHints: {
+                    bingeGroup: `usenetstreamer-instant-${baseIdentifier}`,
+                    notWebReady: true,
+                  },
+                });
+              }
+            }
+
+            if (instantStreams.length > 0) {
+              console.log(`[INSTANT CACHE] Returning ${instantStreams.length} instant stream(s) from history`);
+              res.json({ streams: instantStreams });
+              return;
+            }
+
+            // Fallback: just return the cached entry if no matches found
+            const streamUrl = `${addonBaseUrl}${tokenSegment}/nzb/stream?` + new URLSearchParams({
               downloadUrl: instantEntry.downloadUrl || '',
               type,
               id,
