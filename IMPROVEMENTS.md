@@ -176,22 +176,27 @@ NZB_BLOCKLIST_PATTERNS=remux,[xxx],/\.iso$/i,bdmv,disc
 
 ---
 
-### 8. Health check endpoint
+### 8. Health check endpoint - IMPLEMENTED
 
-**Current behavior:** No dedicated endpoint for monitoring system health and dependencies.
+**Status:** Implemented
 
-**Proposed:** Add `/health` endpoint that checks connectivity to all dependencies.
+**Behavior:** The `/health` endpoint checks connectivity to all dependencies and returns JSON status.
 
-**Implementation:**
-- Create `/health` endpoint returning JSON status
-- Check connectivity to:
-  - nzbdav2 API (queue/history endpoints)
-  - nzbdav2 WebDAV (list operation)
-  - Indexer manager or direct indexers (search endpoint)
-  - Cinemeta (metadata fetch)
-- Return overall status (healthy/degraded/unhealthy)
-- Include response times for each dependency
-- Support `?verbose=true` for detailed diagnostics
+**Endpoints:**
+- `GET /health` - Basic health check (no auth required)
+- `GET /health?verbose=true` - Detailed diagnostics
+
+**Checks performed:**
+- nzbdav2 API (queue endpoint with limit=1)
+- nzbdav2 WebDAV (PROPFIND with Depth:0)
+- Indexer manager (Prowlarr system/status or NZBHydra caps)
+- Cinemeta (known stable movie metadata)
+- TMDb (configuration endpoint)
+
+**Status determination:**
+- `healthy`: All configured dependencies responding
+- `degraded`: Some non-critical dependencies down or unconfigured
+- `unhealthy`: Critical dependencies (nzbdav2 API or WebDAV) down
 
 **Example response:**
 ```json
@@ -199,13 +204,19 @@ NZB_BLOCKLIST_PATTERNS=remux,[xxx],/\.iso$/i,bdmv,disc
   "status": "healthy",
   "timestamp": "2026-01-25T12:00:00Z",
   "dependencies": {
-    "nzbdav2_api": { "status": "up", "latency_ms": 45 },
-    "nzbdav2_webdav": { "status": "up", "latency_ms": 12 },
+    "nzbdav_api": { "status": "up", "latency_ms": 45 },
+    "nzbdav_webdav": { "status": "up", "latency_ms": 12 },
     "indexer": { "status": "up", "latency_ms": 230 },
-    "cinemeta": { "status": "up", "latency_ms": 180 }
+    "cinemeta": { "status": "up", "latency_ms": 180 },
+    "tmdb": { "status": "up", "latency_ms": 95 }
   }
 }
 ```
+
+**HTTP Status Codes:**
+- 200: healthy or degraded
+- 503: unhealthy
+- 500: error running checks
 
 **Benefit:** Easy integration with monitoring tools (Uptime Kuma, Prometheus, etc.), quick diagnosis of connectivity issues.
 
@@ -222,7 +233,7 @@ NZB_BLOCKLIST_PATTERNS=remux,[xxx],/\.iso$/i,bdmv,disc
 | 4. Prefetch multiple | Medium | Medium | P2 | DONE |
 | 6. Admin dashboard stats | Low | Medium | P2 | DONE |
 | 7. Configurable blocklist | Low | Low | P3 | DONE |
-| 8. Health check endpoint | Low | Low | P3 | |
+| 8. Health check endpoint | Low | Low | P3 | DONE |
 | 5. Smarter history matching | Medium | High | P4 | DONE |
 
 ---

@@ -42,6 +42,7 @@ const specialMetadata = require('./src/services/specialMetadata');
 const tmdbService = require('./src/services/tmdb');
 const stats = require('./src/stats');
 const blocklist = require('./src/blocklist');
+const health = require('./src/health');
 
 const app = express();
 let currentPort = Number(process.env.PORT || 7000);
@@ -447,6 +448,36 @@ app.use('/:token/admin', (req, res, next) => {
 
 app.get('/', (req, res) => {
   res.redirect('/admin');
+});
+
+// Health check endpoint - no auth required for monitoring tools
+app.get('/health', async (req, res) => {
+  try {
+    const verbose = req.query.verbose === 'true' || req.query.verbose === '1';
+
+    const result = await health.runHealthChecks({
+      nzbdavUrl: (process.env.NZBDAV_URL || '').trim().replace(/\/+$/, ''),
+      nzbdavApiKey: (process.env.NZBDAV_API_KEY || '').trim(),
+      nzbdavWebdavUrl: (process.env.NZBDAV_WEBDAV_URL || process.env.NZBDAV_URL || '').trim().replace(/\/+$/, ''),
+      nzbdavWebdavUser: (process.env.NZBDAV_WEBDAV_USER || '').trim(),
+      nzbdavWebdavPass: (process.env.NZBDAV_WEBDAV_PASS || '').trim(),
+      indexerType: (process.env.INDEXER_MANAGER || 'prowlarr').trim().toLowerCase(),
+      indexerUrl: (process.env.INDEXER_MANAGER_URL || process.env.PROWLARR_URL || '').trim().replace(/\/+$/, ''),
+      indexerApiKey: (process.env.INDEXER_MANAGER_API_KEY || process.env.PROWLARR_API_KEY || '').trim(),
+      tmdbApiKey: (process.env.TMDB_API_KEY || '').trim(),
+    }, { verbose });
+
+    // Set appropriate HTTP status based on health
+    const httpStatus = result.status === 'healthy' ? 200 : result.status === 'degraded' ? 200 : 503;
+    res.status(httpStatus).json(result);
+  } catch (error) {
+    console.error('[HEALTH] Error running health checks:', error);
+    res.status(500).json({
+      status: 'error',
+      timestamp: new Date().toISOString(),
+      message: error.message || 'Health check failed',
+    });
+  }
 });
 
 app.use((req, res, next) => {
