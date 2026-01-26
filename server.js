@@ -1328,15 +1328,14 @@ async function streamHandler(req, res) {
             // Find all history items matching the title keywords
             for (const [normalizedHistoryTitle, historyEntry] of historyCheck.entries()) {
               const historyLower = normalizedHistoryTitle.toLowerCase();
-              // Require all core keywords to match
+              // Require all core keywords to match (year is optional - some releases don't include it)
               const keywordsMatch = titleKeywords.length > 0 && titleKeywords.every((kw) => historyLower.includes(kw));
-              const yearMatches = !yearStr || historyLower.includes(yearStr);
 
               if (process.env.DEBUG_HISTORY_MATCHING === 'true') {
-                console.log(`[INSTANT CACHE DEBUG] Checking "${normalizedHistoryTitle}": keywords=${keywordsMatch}, year=${yearMatches}`);
+                console.log(`[INSTANT CACHE DEBUG] Checking "${normalizedHistoryTitle}": keywords=${keywordsMatch}`);
               }
 
-              if (keywordsMatch && yearMatches) {
+              if (keywordsMatch) {
                 matchedNormalizedTitles.add(normalizedHistoryTitle);
 
                 const streamUrl = `${addonBaseUrl}${tokenSegment}/nzb/stream?` + new URLSearchParams({
@@ -3158,12 +3157,11 @@ async function streamHandler(req, res) {
         // Skip if already matched by an indexer result
         if (matchedNormalizedTitles.has(normalizedHistoryTitle)) continue;
 
-        // Check if history item matches current content by keywords
+        // Check if history item matches current content by keywords (year is optional)
         const historyLower = normalizedHistoryTitle.toLowerCase();
         const keywordsMatch = titleKeywords.length > 0 && titleKeywords.every((kw) => historyLower.includes(kw));
-        const yearMatches = !yearStr || historyLower.includes(yearStr);
 
-        if (keywordsMatch && yearMatches) {
+        if (keywordsMatch) {
           // Create an instant stream for this history item
           const tokenSegment = ADDON_SHARED_SECRET ? `/${ADDON_SHARED_SECRET}` : '';
           const historyParams = new URLSearchParams({
