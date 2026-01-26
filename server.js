@@ -2741,14 +2741,19 @@ async function streamHandler(req, res) {
 
     // Skip NZBDav history fetching in native streaming mode
     let historyByTitle = new Map();
+    let historyByNzoId = new Map(); // Secondary lookup by nzoId for prefetched items
     if (STREAMING_MODE !== 'native') {
       try {
         historyByTitle = await nzbdavService.fetchCompletedNzbdavHistory([categoryForType]);
         if (historyByTitle.size > 0) {
           console.log(`[NZBDAV] Loaded ${historyByTitle.size} completed NZBs for instant playback detection (category=${categoryForType})`);
-          // Debug: log history normalized titles to help diagnose matching issues
-          if (process.env.DEBUG_HISTORY_MATCHING === 'true') {
-            for (const [normalizedTitle, historyEntry] of historyByTitle.entries()) {
+          // Build secondary lookup by nzoId for prefetched items that completed
+          for (const [normalizedTitle, historyEntry] of historyByTitle.entries()) {
+            if (historyEntry.nzoId) {
+              historyByNzoId.set(historyEntry.nzoId, historyEntry);
+            }
+            // Debug: log history normalized titles to help diagnose matching issues
+            if (process.env.DEBUG_HISTORY_MATCHING === 'true') {
               console.log(`[NZBDAV DEBUG] History item: "${normalizedTitle}" → ${historyEntry.jobName}`);
             }
           }
@@ -2830,13 +2835,16 @@ async function streamHandler(req, res) {
         // Cache entries are managed internally by the cache module
         const normalizedTitle = normalizeReleaseTitle(result.title);
         const historySlot = normalizedTitle ? historyByTitle.get(normalizedTitle) : null;
-        const isInstant = Boolean(historySlot); // Instant playback if found in history
+        // Check if this item was prefetched
+        const prefetchedEntry = prefetchedNzbdavJobs.get(result.downloadUrl);
+        // Also check if prefetched item's nzoId is now in history (download completed)
+        const prefetchedNzoId = prefetchedEntry?.nzoId;
+        const prefetchedInHistory = prefetchedNzoId ? historyByNzoId.get(prefetchedNzoId) : null;
+        const isInstant = Boolean(historySlot) || Boolean(prefetchedInHistory); // Instant if in history OR prefetch completed
         // Debug: log history matching attempts
         if (process.env.DEBUG_HISTORY_MATCHING === 'true') {
-          console.log(`[HISTORY MATCH] "${normalizedTitle}" → ${isInstant ? 'MATCH' : 'no match'}`);
+          console.log(`[HISTORY MATCH] "${normalizedTitle}" → ${isInstant ? 'MATCH' : 'no match'}${prefetchedInHistory ? ' (via prefetch nzoId)' : ''}`);
         }
-        // Check if this item was prefetched (downloading or ready but not yet in history)
-        const prefetchedEntry = prefetchedNzbdavJobs.get(result.downloadUrl);
         const isPrefetched = Boolean(prefetchedEntry) && !isInstant;
 
         const directTriageInfo = triageDecisions.get(result.downloadUrl);
