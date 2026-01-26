@@ -41,6 +41,7 @@ const nzbdavService = require('./src/services/nzbdav');
 const specialMetadata = require('./src/services/specialMetadata');
 const tmdbService = require('./src/services/tmdb');
 const stats = require('./src/stats');
+const blocklist = require('./src/blocklist');
 
 const app = express();
 let currentPort = Number(process.env.PORT || 7000);
@@ -59,13 +60,10 @@ const QUALITY_FEATURE_PATTERNS = [
   { label: 'SDR', regex: /\bsdr\b/i },
 ];
 
-// Blocklist patterns for unplayable/unwanted release types
-// Matches standalone tokens: .iso, -iso-, (iso), space-delimited, etc.
-const RELEASE_BLOCKLIST_REGEX = /(?:^|[\s.\-_(\[])(?:iso|img|bin|cue|exe)(?:[\s.\-_\)\]]|$)/i;
-// Separate pattern for remux - matches anywhere (catches BDRemux, BluRay.Remux, etc.)
-const REMUX_BLOCKLIST_REGEX = /remux/i;
-// Adult content blocklist - matches common porn site tags and markers
-const ADULT_BLOCKLIST_REGEX = /\b(xxx|porn|wtf-porn|xvideos|pornhub|brazzers|bangbros|realitykings|naughtyamerica|cum\s*shower|blowjob|gangbang|creampie|milf|stepmom|stepsister|onlyfans)\b/i;
+// Configurable blocklist - patterns loaded from NZB_BLOCKLIST_PATTERNS env var
+// Supports: simple substring ("remux"), regex ("/\.iso$/i"), word boundary ("[xxx]")
+// Default patterns block: iso/img/bin/cue/exe file types, remux releases, adult content
+let BLOCKLIST_CHECKER = blocklist.buildBlocklistFromEnv(process.env.NZB_BLOCKLIST_PATTERNS);
 
 const PREFETCH_NZBDAV_JOB_TTL_MS = 60 * 60 * 1000;
 const prefetchedNzbdavJobs = new Map();
@@ -897,6 +895,9 @@ function rebuildRuntimeConfig({ log = true } = {}) {
     healthCheckTimeoutMs: TRIAGE_TIME_BUDGET_MS,
   };
 
+  // Reload configurable blocklist patterns
+  BLOCKLIST_CHECKER = blocklist.buildBlocklistFromEnv(process.env.NZB_BLOCKLIST_PATTERNS);
+
   maybePrewarmSharedNntpPool();
   restartSharedPoolMonitor();
   const resolvedAddonBase = ADDON_BASE_URL || `http://${SERVER_HOST}:${currentPort}`;
@@ -940,6 +941,7 @@ const ADMIN_CONFIG_KEYS = [
   'NZB_MAX_RESULT_SIZE_GB',
   'NZB_DEDUP_ENABLED',
   'NZB_HIDE_BLOCKED_RESULTS',
+  'NZB_BLOCKLIST_PATTERNS',
   'NZB_ALLOWED_RESOLUTIONS',
   'NZB_RESOLUTION_LIMIT_PER_QUALITY',
   'NZBDAV_URL',
@@ -2482,9 +2484,9 @@ async function streamHandler(req, res) {
     const hasVerifiedResult = triagePool.some((candidate) => getDecisionStatus(candidate) === 'verified');
     let triageEligibleResults = [];
 
-    // Helper to check if candidate is blocklisted (remux/iso/adult/etc)
+    // Helper to check if candidate is blocklisted (configurable patterns)
     const isBlocklisted = (candidate) =>
-      candidate.title && (RELEASE_BLOCKLIST_REGEX.test(candidate.title) || REMUX_BLOCKLIST_REGEX.test(candidate.title) || ADULT_BLOCKLIST_REGEX.test(candidate.title));
+      candidate.title && BLOCKLIST_CHECKER.isBlocked(candidate.title).blocked;
 
     // Strategy: Always prefer NEW candidates (no decision yet) over retrying unverified ones
     // This explores more of the pool instead of getting stuck on failing candidates
@@ -2850,18 +2852,11 @@ async function streamHandler(req, res) {
     }
 
     finalNzbResults.forEach((result) => {
-        // Skip releases matching blocklist (ISO, sample, exe, remux, adult, etc.)
-        if (result.title) {
-          if (RELEASE_BLOCKLIST_REGEX.test(result.title)) {
-            stats.trackBlocklistHit('iso');
-            return;
-          }
-          if (REMUX_BLOCKLIST_REGEX.test(result.title)) {
-            stats.trackBlocklistHit('remux');
-            return;
-          }
-          if (ADULT_BLOCKLIST_REGEX.test(result.title)) {
-            stats.trackBlocklistHit('adult');
+        // Skip releases matching configurable blocklist patterns
+        if (result.title && BLOCKLIST_CHECKER.enabled) {
+          const blockResult = BLOCKLIST_CHECKER.isBlocked(result.title);
+          if (blockResult.blocked) {
+            stats.trackBlocklistHit(blockResult.category || 'other');
             return;
           }
         }

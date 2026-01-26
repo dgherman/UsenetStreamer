@@ -235,7 +235,8 @@ input[type="text"],
 input[type="url"],
 input[type="password"],
 input[type="number"],
-select {
+select,
+textarea {
   background: var(--bg-input);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-soft);
@@ -246,13 +247,21 @@ select {
   min-height: 48px;
 }
 
+textarea {
+  resize: vertical;
+  font-family: monospace;
+  line-height: 1.4;
+}
+
 input:hover,
-select:hover {
+select:hover,
+textarea:hover {
   border-color: rgba(53, 213, 255, 0.5);
 }
 
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   outline: none;
   border-color: var(--accent-strong);
   box-shadow: 0 0 0 4px rgba(62, 180, 255, 0.18);

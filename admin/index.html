@@ -241,6 +241,10 @@
                 <span class="field-hint">Blocked releases already show a red 🚫 tag; enable this to remove them entirely from manifests.</span>
               </span>
             </label>
+            <label>Blocklist Patterns
+              <textarea name="NZB_BLOCKLIST_PATTERNS" rows="3" placeholder="remux,[xxx],/\.iso$/i"></textarea>
+              <span class="field-hint">Comma-separated patterns to block. Types: simple text (<code>remux</code>), word boundary (<code>[xxx]</code>), regex (<code>/\.iso$/i</code>). Leave empty to disable blocklist. Default blocks: ISO/IMG/BIN, REMUX, adult content.</span>
+            </label>
           </div>
           <div class="quality-filter">
             <div class="quality-filter-header">

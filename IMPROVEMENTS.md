@@ -146,22 +146,30 @@ It does NOT help with slow downloads where Stremio gives up waiting.
 
 ---
 
-### 7. Configurable blocklist
+### 7. Configurable blocklist - IMPLEMENTED
 
-**Current behavior:** REMUX/ISO blocklist is hardcoded in server.js as regex patterns.
+**Status:** Implemented
 
-**Proposed:** Move blocklist to configuration (environment variable or config file).
+**Behavior:** Blocklist patterns are now configurable via the `NZB_BLOCKLIST_PATTERNS` environment variable. Supports three pattern types:
+- Simple substring match: `remux` (case-insensitive, matches anywhere)
+- Word boundary match: `[xxx]` (matches whole word only)
+- Regex pattern: `/\.iso$/i` (full regex with flags)
 
-**Implementation:**
-- Add `NZB_BLOCKLIST_PATTERNS` environment variable (comma-separated patterns)
-- Support both simple substring match and regex patterns
-- Provide sensible defaults (remux, iso, img, bin, exe)
-- Allow empty value to disable blocklist
-- Hot-reload on config change via admin panel
+**Default patterns:** Block ISO/IMG/BIN/CUE/EXE file types, REMUX releases, and adult content markers. Leave empty to disable blocklist entirely.
+
+**Implementation details:**
+- Created `src/blocklist/index.js` module for pattern parsing and matching
+- Patterns are comma-separated in the environment variable
+- Hot-reload supported via admin panel config save
+- Stats tracking categorizes hits as: iso, remux, adult, or other
+- Admin panel includes textarea for editing patterns with syntax hints
+
+**Configuration:**
+- `NZB_BLOCKLIST_PATTERNS`: Comma-separated patterns (default: comprehensive list matching original behavior)
 
 **Example config:**
 ```
-NZB_BLOCKLIST_PATTERNS=remux,/\.iso$/i,bdmv,disc
+NZB_BLOCKLIST_PATTERNS=remux,[xxx],/\.iso$/i,bdmv,disc
 ```
 
 **Benefit:** Users can customize blocklist without code changes, easier to add/remove patterns.
@@ -213,7 +221,7 @@ NZB_BLOCKLIST_PATTERNS=remux,/\.iso$/i,bdmv,disc
 | 3. Negative caching | Medium | Low | P2 | DONE |
 | 4. Prefetch multiple | Medium | Medium | P2 | DONE |
 | 6. Admin dashboard stats | Low | Medium | P2 | DONE |
-| 7. Configurable blocklist | Low | Low | P3 | |
+| 7. Configurable blocklist | Low | Low | P3 | DONE |
 | 8. Health check endpoint | Low | Low | P3 | |
 | 5. Smarter history matching | Medium | High | P4 | DONE |
 

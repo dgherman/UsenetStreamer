@@ -38,6 +38,7 @@ const stats = {
     remux: 0,       // REMUX releases filtered
     iso: 0,         // ISO/IMG/BIN releases filtered
     adult: 0,       // Adult content filtered
+    other: 0,       // Other custom pattern matches
     total: 0,       // Total blocklist hits
   },
 
@@ -122,6 +123,7 @@ function resetStats() {
   stats.blocklist.remux = 0;
   stats.blocklist.iso = 0;
   stats.blocklist.adult = 0;
+  stats.blocklist.other = 0;
   stats.blocklist.total = 0;
   stats.requests.total = 0;
   stats.requests.movies = 0;
@@ -192,6 +194,8 @@ function trackBlocklistHit(type) {
     stats.blocklist.iso++;
   } else if (t === 'adult') {
     stats.blocklist.adult++;
+  } else {
+    stats.blocklist.other++;
   }
   stats.blocklist.total++;
 }
