@@ -2772,10 +2772,6 @@ async function streamHandler(req, res) {
             if (historyEntry.nzoId) {
               historyByNzoId.set(historyEntry.nzoId, historyEntry);
             }
-            // Debug: log history normalized titles to help diagnose matching issues
-            if (process.env.DEBUG_HISTORY_MATCHING === 'true') {
-              console.log(`[NZBDAV DEBUG] History item: "${normalizedTitle}" → ${historyEntry.jobName}`);
-            }
           }
         }
       } catch (historyError) {
@@ -2805,6 +2801,24 @@ async function streamHandler(req, res) {
     const regularStreams = [];
     // Track which history nzoIds have been claimed in this request to prevent duplicates
     const claimedHistoryNzoIds = new Set();
+
+    // Pre-pass: Reserve nzoIds for exact matches BEFORE processing smart matches
+    // This prevents smart matches from claiming nzoIds that should belong to exact matches
+    const exactMatchNzoIds = new Set();
+    if (historyByTitle.size > 0) {
+      for (const result of finalNzbResults) {
+        if (!result.title) continue;
+        const normalizedTitle = normalizeReleaseTitle(result.title);
+        if (!normalizedTitle) continue;
+        const historyEntry = historyByTitle.get(normalizedTitle);
+        if (historyEntry?.nzoId && !exactMatchNzoIds.has(historyEntry.nzoId)) {
+          exactMatchNzoIds.add(historyEntry.nzoId);
+        }
+      }
+      if (process.env.DEBUG_HISTORY_MATCHING === 'true' && exactMatchNzoIds.size > 0) {
+        console.log(`[HISTORY PRE-PASS] Reserved ${exactMatchNzoIds.size} nzoIds for exact matches`);
+      }
+    }
 
     finalNzbResults.forEach((result) => {
         // Skip releases matching blocklist (ISO, sample, exe, remux, adult, etc.)
@@ -2896,6 +2910,10 @@ async function streamHandler(req, res) {
           for (const match of smartMatches) {
             if (isSeriesType && requestedEpisode && !fileMatchesEpisode(match.entry.jobName, requestedEpisode)) {
               continue;
+            }
+            // Skip nzoIds reserved for exact matches - let those results claim them properly
+            if (match.entry.nzoId && exactMatchNzoIds.has(match.entry.nzoId)) {
+              continue; // Reserved for an exact match
             }
             // Check if this history entry has already been claimed by another result in this request
             if (match.entry.nzoId && claimedHistoryNzoIds.has(match.entry.nzoId)) {

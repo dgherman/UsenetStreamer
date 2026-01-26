@@ -212,3 +212,22 @@ NZB_BLOCKLIST_PATTERNS=remux,/\.iso$/i,bdmv,disc
 | 7. Configurable blocklist | Low | Low | P3 | |
 | 8. Health check endpoint | Low | Low | P3 | |
 | 5. Smarter history matching | Medium | High | P4 | DONE |
+
+---
+
+## Bug Fixes
+
+### Smart matching claiming exact match nzoIds - FIXED
+
+**Problem:** When smart matching ran before exact matches were processed, it would claim nzoIds that should belong to exact matches. For example, if the search results included both:
+- "shrinking s01e01 multi 1080p web h264 higgsboson" (no exact history match)
+- "shrinking s01e01 1080p web h264 truffle" (has exact history match)
+
+The first result would run smart matching, find "truffle" in history (matching title words), and claim its nzoId. When the second result was processed, the exact match was found but already claimed, so it showed as "no match".
+
+**Solution:** Added a pre-pass that reserves nzoIds for exact matches BEFORE processing any results. Smart matching now skips nzoIds that are reserved for exact matches, ensuring exact matches always have priority.
+
+**Implementation:**
+- Added `exactMatchNzoIds` Set populated during a pre-pass over all results
+- Smart matching skips any nzoId found in `exactMatchNzoIds`
+- This ensures exact matches are always claimed by their corresponding results
