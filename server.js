@@ -2697,6 +2697,12 @@ async function streamHandler(req, res) {
         historyByTitle = await nzbdavService.fetchCompletedNzbdavHistory([categoryForType]);
         if (historyByTitle.size > 0) {
           console.log(`[NZBDAV] Loaded ${historyByTitle.size} completed NZBs for instant playback detection (category=${categoryForType})`);
+          // Debug: log history normalized titles to help diagnose matching issues
+          if (process.env.DEBUG_HISTORY_MATCHING === 'true') {
+            for (const [normalizedTitle, historyEntry] of historyByTitle.entries()) {
+              console.log(`[NZBDAV DEBUG] History item: "${normalizedTitle}" → ${historyEntry.jobName}`);
+            }
+          }
         }
       } catch (historyError) {
         console.warn(`[NZBDAV] Unable to load NZBDav history for instant detection: ${historyError.message}`);
@@ -2721,6 +2727,7 @@ async function streamHandler(req, res) {
       .map((r) => r.downloadUrl);
 
     const instantStreams = [];
+    const prefetchedStreams = [];
     const regularStreams = [];
 
     finalNzbResults.forEach((result) => {
@@ -2775,6 +2782,13 @@ async function streamHandler(req, res) {
         const normalizedTitle = normalizeReleaseTitle(result.title);
         const historySlot = normalizedTitle ? historyByTitle.get(normalizedTitle) : null;
         const isInstant = Boolean(historySlot); // Instant playback if found in history
+        // Debug: log history matching attempts
+        if (process.env.DEBUG_HISTORY_MATCHING === 'true') {
+          console.log(`[HISTORY MATCH] "${normalizedTitle}" → ${isInstant ? 'MATCH' : 'no match'}`);
+        }
+        // Check if this item was prefetched (downloading or ready but not yet in history)
+        const prefetchedEntry = prefetchedNzbdavJobs.get(result.downloadUrl);
+        const isPrefetched = Boolean(prefetchedEntry) && !isInstant;
 
         const directTriageInfo = triageDecisions.get(result.downloadUrl);
         const fallbackTitleKey = normalizedTitle;
@@ -2901,6 +2915,7 @@ async function streamHandler(req, res) {
         const tags = [];
         if (triageTag) tags.push(triageTag);
         if (isInstant && STREAMING_MODE !== 'native') tags.push('⚡ Instant');
+        else if (isPrefetched && STREAMING_MODE !== 'native') tags.push('📥 Prefetching');
         if (preferredLanguageMatches.length > 0) {
           preferredLanguageMatches.forEach((language) => tags.push(language));
         }
@@ -2933,6 +2948,8 @@ async function streamHandler(req, res) {
             if (historySlot) {
               behaviorHints.cachedFromHistory = true;
             }
+          } else if (isPrefetched) {
+            behaviorHints.prefetching = true;
           }
         }
 
@@ -2988,6 +3005,7 @@ async function streamHandler(req, res) {
               type: 'nzb',
               cached: Boolean(isInstant),
               cachedFromHistory: Boolean(historySlot),
+              prefetched: Boolean(isPrefetched),
               languages: releaseLanguages,
               indexerLanguage: sourceLanguage,
               resolution: detectedResolutionToken || null,
@@ -3035,6 +3053,8 @@ async function streamHandler(req, res) {
               size: result.size,
             });
           }
+        } else if (isPrefetched) {
+          prefetchedStreams.push(stream);
         } else {
           regularStreams.push(stream);
         }
@@ -3052,13 +3072,69 @@ async function streamHandler(req, res) {
         }
       });
 
-    const streams = instantStreams.concat(regularStreams);
+    // Add instant streams for history items not matched by indexer results
+    // This ensures all downloaded items show up, not just those with matching indexer results
+    if (STREAMING_MODE !== 'native' && historyByTitle.size > 0 && movieTitle) {
+      const matchedNormalizedTitles = new Set(
+        instantStreams.map((s) => normalizeReleaseTitle(s.meta?.originalTitle)).filter(Boolean)
+      );
+      const titleKeywords = movieTitle.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+      const yearStr = releaseYear ? String(releaseYear) : null;
 
-    // Log cached streams count (only relevant for NZBDav mode)
+      for (const [normalizedHistoryTitle, historyEntry] of historyByTitle.entries()) {
+        // Skip if already matched by an indexer result
+        if (matchedNormalizedTitles.has(normalizedHistoryTitle)) continue;
+
+        // Check if history item matches current content by keywords
+        const historyLower = normalizedHistoryTitle.toLowerCase();
+        const keywordsMatch = titleKeywords.length > 0 && titleKeywords.every((kw) => historyLower.includes(kw));
+        const yearMatches = !yearStr || historyLower.includes(yearStr);
+
+        if (keywordsMatch && yearMatches) {
+          // Create an instant stream for this history item
+          const tokenSegment = ADDON_SHARED_SECRET ? `/${ADDON_SHARED_SECRET}` : '';
+          const historyParams = new URLSearchParams({
+            type,
+            id,
+            title: historyEntry.jobName,
+            historyNzoId: historyEntry.nzoId,
+            historyJobName: historyEntry.jobName,
+            historyCategory: historyEntry.category || categoryForType,
+          });
+          const historyStreamUrl = `${addonBaseUrl}${tokenSegment}/nzb/stream?${historyParams.toString()}`;
+
+          const historyStream = {
+            title: `${historyEntry.jobName}\n⚡ Instant • History\n${historyEntry.category || 'nzbdav'}`,
+            name: ADDON_NAME || DEFAULT_ADDON_NAME,
+            url: historyStreamUrl,
+            behaviorHints: {
+              notWebReady: true,
+              cached: true,
+              cachedFromHistory: true,
+            },
+            meta: {
+              originalTitle: historyEntry.jobName,
+              type: 'nzb',
+              cached: true,
+              cachedFromHistory: true,
+              historyOnly: true, // Flag: this stream came from history, not indexer
+            }
+          };
+
+          instantStreams.push(historyStream);
+          console.log(`[INSTANT] Added history-only stream: ${historyEntry.jobName}`);
+        }
+      }
+    }
+
+    const streams = instantStreams.concat(prefetchedStreams, regularStreams);
+
+    // Log cached and prefetched streams count (only relevant for NZBDav mode)
     if (STREAMING_MODE !== 'native') {
       const instantCount = streams.filter((stream) => stream?.meta?.cached).length;
-      if (instantCount > 0) {
-        console.log(`[STREMIO] ${instantCount}/${streams.length} streams already cached in NZBDav`);
+      const prefetchedCount = streams.filter((stream) => stream?.meta?.prefetched).length;
+      if (instantCount > 0 || prefetchedCount > 0) {
+        console.log(`[STREMIO] ${instantCount} instant, ${prefetchedCount} prefetching / ${streams.length} total streams`);
       }
     }
 
