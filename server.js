@@ -465,6 +465,11 @@ app.get('/health', async (req, res) => {
       indexerUrl: (process.env.INDEXER_MANAGER_URL || process.env.PROWLARR_URL || '').trim().replace(/\/+$/, ''),
       indexerApiKey: (process.env.INDEXER_MANAGER_API_KEY || process.env.PROWLARR_API_KEY || '').trim(),
       tmdbApiKey: (process.env.TMDB_API_KEY || '').trim(),
+      usenetHost: (process.env.NZB_TRIAGE_NNTP_HOST || '').trim(),
+      usenetPort: parseInt(process.env.NZB_TRIAGE_NNTP_PORT, 10) || 119,
+      usenetTls: (process.env.NZB_TRIAGE_NNTP_TLS || process.env.NZB_TRIAGE_NNTP_USE_TLS || '').toLowerCase() === 'true',
+      usenetUser: (process.env.NZB_TRIAGE_NNTP_USER || '').trim(),
+      usenetPass: (process.env.NZB_TRIAGE_NNTP_PASS || '').trim(),
     }, { verbose });
 
     // Set appropriate HTTP status based on health

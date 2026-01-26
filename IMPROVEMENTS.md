@@ -192,6 +192,7 @@ NZB_BLOCKLIST_PATTERNS=remux,[xxx],/\.iso$/i,bdmv,disc
 - Indexer manager (Prowlarr system/status or NZBHydra caps)
 - Cinemeta (known stable movie metadata)
 - TMDb (configuration endpoint)
+- Usenet provider (NNTP connection + auth via NZB_TRIAGE_NNTP_* settings)
 
 **Status determination:**
 - `healthy`: All configured dependencies responding
@@ -208,10 +209,13 @@ NZB_BLOCKLIST_PATTERNS=remux,[xxx],/\.iso$/i,bdmv,disc
     "nzbdav_webdav": { "status": "up", "latency_ms": 12 },
     "indexer": { "status": "up", "latency_ms": 230 },
     "cinemeta": { "status": "up", "latency_ms": 180 },
-    "tmdb": { "status": "up", "latency_ms": 95 }
+    "tmdb": { "status": "up", "latency_ms": 95 },
+    "usenet": { "status": "up", "latency_ms": 450 }
   }
 }
 ```
+
+**Note:** The usenet check performs an NNTP connection with TLS handshake and authentication, so it has higher latency (~400-500ms) than HTTP checks. Consider longer polling intervals if monitoring frequently.
 
 **HTTP Status Codes:**
 - 200: healthy or degraded

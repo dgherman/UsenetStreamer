@@ -237,6 +237,116 @@ async function checkTmdb(config) {
   return { status: 'up', latencyMs };
 }
 
+// Lazy-load NNTP client to avoid startup errors if not installed
+let NNTPClient = null;
+function getNNTPClient() {
+  if (NNTPClient === undefined) return null;
+  if (NNTPClient === null) {
+    try {
+      const nntpModule = require('nntp/lib/nntp');
+      NNTPClient = typeof nntpModule === 'function' ? nntpModule : nntpModule?.NNTP || null;
+    } catch {
+      NNTPClient = undefined; // Mark as unavailable
+    }
+  }
+  return NNTPClient;
+}
+
+/**
+ * Check Usenet provider connectivity (NNTP)
+ * Note: NNTP connections are more expensive than HTTP. Consider longer polling intervals.
+ */
+async function checkUsenet(config) {
+  const { host, port = 119, useTls = false, username, password, timeout = DEFAULT_TIMEOUT_MS } = config;
+  if (!host) return { status: 'unconfigured', message: 'Host not configured' };
+
+  const NNTP = getNNTPClient();
+  if (!NNTP) return { status: 'unconfigured', message: 'NNTP library not available' };
+
+  const { error, latencyMs } = await withLatency(() => {
+    return new Promise((resolve, reject) => {
+      const client = new NNTP();
+      let settled = false;
+      let reachedReady = false;
+      let streamRef = null;
+
+      const cleanup = () => {
+        if (streamRef && typeof streamRef.removeListener === 'function') {
+          streamRef.removeListener('error', onError);
+        }
+        client.removeListener('error', onError);
+        client.removeListener('close', onClose);
+        client.removeListener('ready', onReady);
+      };
+
+      const finalize = (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        cleanup();
+        try {
+          if (reachedReady && typeof client.quit === 'function') {
+            client.quit(() => client.end());
+          } else if (typeof client.end === 'function') {
+            client.end();
+          }
+        } catch {
+          try { client.end(); } catch { /* noop */ }
+        }
+        if (err) reject(err);
+        else resolve();
+      };
+
+      const onReady = () => {
+        reachedReady = true;
+        finalize(null);
+      };
+
+      const onError = (err) => {
+        finalize(new Error(err?.message || 'NNTP error'));
+      };
+
+      const onClose = () => {
+        if (!settled) finalize(new Error('Connection closed'));
+      };
+
+      const timer = setTimeout(() => {
+        finalize(new Error('Connection timed out'));
+      }, timeout);
+
+      client.once('ready', onReady);
+      client.once('error', onError);
+      client.once('close', onClose);
+
+      try {
+        streamRef = client.connect({
+          host,
+          port,
+          secure: useTls,
+          user: username || undefined,
+          password: password || undefined,
+          connTimeout: timeout,
+        });
+        if (streamRef && typeof streamRef.on === 'function') {
+          streamRef.on('error', onError);
+        }
+      } catch (err) {
+        finalize(err);
+      }
+    });
+  });
+
+  if (error) {
+    return {
+      status: 'down',
+      message: error.message || 'Connection failed',
+      latencyMs,
+    };
+  }
+
+  return { status: 'up', latencyMs };
+}
+
 /**
  * Determine overall health status
  * @param {Object} checks - Individual check results
@@ -283,7 +393,7 @@ async function runHealthChecks(config, options = {}) {
   const { verbose = false } = options;
 
   // Run all checks in parallel
-  const [nzbdavApi, nzbdavWebdav, indexer, cinemeta, tmdb] = await Promise.all([
+  const [nzbdavApi, nzbdavWebdav, indexer, cinemeta, tmdb, usenet] = await Promise.all([
     checkNzbdavApi({
       baseUrl: config.nzbdavUrl,
       apiKey: config.nzbdavApiKey,
@@ -302,6 +412,13 @@ async function runHealthChecks(config, options = {}) {
     checkTmdb({
       apiKey: config.tmdbApiKey,
     }),
+    checkUsenet({
+      host: config.usenetHost,
+      port: config.usenetPort,
+      useTls: config.usenetTls,
+      username: config.usenetUser,
+      password: config.usenetPass,
+    }),
   ]);
 
   const checks = {
@@ -310,6 +427,7 @@ async function runHealthChecks(config, options = {}) {
     indexer,
     cinemeta,
     tmdb,
+    usenet,
   };
 
   const status = determineOverallStatus(checks);
@@ -342,6 +460,7 @@ module.exports = {
   checkIndexer,
   checkCinemeta,
   checkTmdb,
+  checkUsenet,
   determineOverallStatus,
   runHealthChecks,
 };
