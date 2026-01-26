@@ -242,8 +242,8 @@
               </span>
             </label>
             <label>Blocklist Patterns
-              <textarea name="NZB_BLOCKLIST_PATTERNS" rows="3" placeholder="remux,[xxx],/\.iso$/i"></textarea>
-              <span class="field-hint">Comma-separated patterns to block. Types: simple text (<code>remux</code>), word boundary (<code>[xxx]</code>), regex (<code>/\.iso$/i</code>). Leave empty to disable blocklist. Default blocks: ISO/IMG/BIN, REMUX, adult content.</span>
+              <textarea name="NZB_BLOCKLIST_PATTERNS" rows="3" placeholder="Leave empty for defaults, or enter: remux,[xxx],/\.iso$/i"></textarea>
+              <span class="field-hint">Comma-separated patterns. Types: substring (<code>remux</code>), word boundary (<code>[xxx]</code>), regex (<code>/\.iso$/i</code>). Empty = use defaults (ISO/IMG/BIN, REMUX, adult). Enter <code>none</code> to disable entirely.</span>
             </label>
           </div>
           <div class="quality-filter">

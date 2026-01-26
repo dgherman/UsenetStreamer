@@ -170,25 +170,32 @@ function createBlocklistChecker(patterns) {
  * @returns {{ isBlocked: (title: string) => { blocked: boolean, category: string | null, pattern: string | null }, patterns: Array, enabled: boolean }}
  */
 function buildBlocklistFromEnv(envValue) {
-  // If explicitly set to empty string, disable blocklist
-  if (envValue === '') {
-    console.log('[BLOCKLIST] Blocklist disabled (empty pattern string)');
+  // Normalize the value
+  const trimmed = (envValue ?? '').trim().toLowerCase();
+
+  // Explicit disable with 'none' or 'disabled'
+  if (trimmed === 'none' || trimmed === 'disabled') {
+    console.log('[BLOCKLIST] Blocklist explicitly disabled');
     return createBlocklistChecker([]);
   }
 
-  // If not set or undefined, use defaults
-  const patternsString = envValue !== undefined && envValue !== null
-    ? envValue
-    : getDefaultPatternsString();
+  // Empty or not set = use defaults
+  if (!envValue || envValue.trim() === '') {
+    const patterns = parsePatterns(getDefaultPatternsString());
+    console.log(`[BLOCKLIST] Using ${patterns.length} default patterns`);
+    return createBlocklistChecker(patterns);
+  }
 
-  const patterns = parsePatterns(patternsString);
+  // Custom patterns provided
+  const patterns = parsePatterns(envValue);
 
   if (patterns.length === 0) {
-    console.log('[BLOCKLIST] No valid patterns found, blocklist disabled');
-    return createBlocklistChecker([]);
+    console.log('[BLOCKLIST] No valid patterns found, using defaults');
+    const defaultPatterns = parsePatterns(getDefaultPatternsString());
+    return createBlocklistChecker(defaultPatterns);
   }
 
-  console.log(`[BLOCKLIST] Loaded ${patterns.length} patterns:`, patterns.map((p) => p.source));
+  console.log(`[BLOCKLIST] Loaded ${patterns.length} custom patterns:`, patterns.map((p) => p.source));
   return createBlocklistChecker(patterns);
 }
 
