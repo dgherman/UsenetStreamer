@@ -85,6 +85,17 @@ function prunePrefetchedNzbdavJobs() {
   }
 }
 
+// Find which downloadUrl a prefetched nzoId belongs to
+function findPrefetchedDownloadUrlByNzoId(nzoId) {
+  if (!nzoId) return null;
+  for (const [downloadUrl, entry] of prefetchedNzbdavJobs.entries()) {
+    if (entry.nzoId === nzoId) {
+      return downloadUrl;
+    }
+  }
+  return null;
+}
+
 async function resolvePrefetchedNzbdavJob(downloadUrl) {
   prunePrefetchedNzbdavJobs();
   const entry = prefetchedNzbdavJobs.get(downloadUrl);
@@ -2792,6 +2803,8 @@ async function streamHandler(req, res) {
     const instantStreams = [];
     const prefetchedStreams = [];
     const regularStreams = [];
+    // Track which history nzoIds have been claimed in this request to prevent duplicates
+    const claimedHistoryNzoIds = new Set();
 
     finalNzbResults.forEach((result) => {
         // Skip releases matching blocklist (ISO, sample, exe, remux, adult, etc.)
@@ -2843,12 +2856,31 @@ async function streamHandler(req, res) {
         const cacheKey = nzbdavService.buildNzbdavCacheKey(result.downloadUrl, categoryForType, requestedEpisode);
         // Cache entries are managed internally by the cache module
         const normalizedTitle = normalizeReleaseTitle(result.title);
-        const historySlot = normalizedTitle ? historyByTitle.get(normalizedTitle) : null;
+        let historySlot = normalizedTitle ? historyByTitle.get(normalizedTitle) : null;
+        // Check if this exact match was already claimed by another result
+        if (historySlot?.nzoId && claimedHistoryNzoIds.has(historySlot.nzoId)) {
+          historySlot = null; // Already claimed
+        }
+        // Mark exact match as claimed
+        if (historySlot?.nzoId) {
+          claimedHistoryNzoIds.add(historySlot.nzoId);
+        }
         // Check if this item was prefetched
         const prefetchedEntry = prefetchedNzbdavJobs.get(result.downloadUrl);
         // Also check if prefetched item's nzoId is now in history (download completed)
         const prefetchedNzoId = prefetchedEntry?.nzoId;
-        const prefetchedInHistory = prefetchedNzoId ? historyByNzoId.get(prefetchedNzoId) : null;
+        let prefetchedInHistory = prefetchedNzoId ? historyByNzoId.get(prefetchedNzoId) : null;
+        // Check if this nzoId was already claimed by another result
+        if (prefetchedInHistory && prefetchedNzoId && claimedHistoryNzoIds.has(prefetchedNzoId)) {
+          prefetchedInHistory = null; // Already claimed
+        }
+        // Clean up prefetched entry and mark as claimed once confirmed in history
+        if (prefetchedInHistory && prefetchedEntry) {
+          prefetchedNzbdavJobs.delete(result.downloadUrl);
+          if (prefetchedNzoId) {
+            claimedHistoryNzoIds.add(prefetchedNzoId);
+          }
+        }
         // Fallback: use smart matching if exact lookups failed (handles changed downloadUrls)
         // Movies: use strict matching to avoid false positives (e.g., "Toy Story 5" → "Toy Story 1995")
         // Series: use asymmetric matching to handle episode name variations
@@ -2865,7 +2897,20 @@ async function streamHandler(req, res) {
             if (isSeriesType && requestedEpisode && !fileMatchesEpisode(match.entry.jobName, requestedEpisode)) {
               continue;
             }
+            // Check if this history entry has already been claimed by another result in this request
+            if (match.entry.nzoId && claimedHistoryNzoIds.has(match.entry.nzoId)) {
+              continue; // Already claimed by another result
+            }
+            // Clean up prefetched entry if it exists (download completed, now in history)
+            const prefetchedViaUrl = findPrefetchedDownloadUrlByNzoId(match.entry.nzoId);
+            if (prefetchedViaUrl) {
+              prefetchedNzbdavJobs.delete(prefetchedViaUrl);
+            }
             smartMatchedHistory = match.entry;
+            // Mark this nzoId as claimed so other results don't also claim it
+            if (match.entry.nzoId) {
+              claimedHistoryNzoIds.add(match.entry.nzoId);
+            }
             break;
           }
         }
