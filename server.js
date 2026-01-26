@@ -1301,12 +1301,13 @@ async function streamHandler(req, res) {
             const addonBaseUrl = ADDON_BASE_URL.replace(/\/$/, '');
 
             // Use smart history matching to find ALL related items
-            // Use requireAllWords: false to allow asymmetric matching (history words in search)
-            // This handles cases where search title includes episode name but history doesn't
+            // Movies: use strict matching (requireAllWords: true) to avoid false positives like "Toy Story 5" → "Toy Story 1995"
+            // Series: use asymmetric matching (requireAllWords: false) to handle episode name variations
             const debugMatching = process.env.DEBUG_HISTORY_MATCHING === 'true';
+            const isSeriesType = type === 'series';
             const matchingItems = findMatchingHistoryItems(instantEntry.jobName, historyCheck, {
-              minSimilarity: 0.7,
-              requireAllWords: false, // Allow asymmetric matching for episode name variations
+              minSimilarity: isSeriesType ? 0.7 : 0.8,
+              requireAllWords: !isSeriesType, // Strict for movies, asymmetric for series
               debug: debugMatching,
             });
 
@@ -2843,11 +2844,14 @@ async function streamHandler(req, res) {
         const prefetchedNzoId = prefetchedEntry?.nzoId;
         const prefetchedInHistory = prefetchedNzoId ? historyByNzoId.get(prefetchedNzoId) : null;
         // Fallback: use smart matching if exact lookups failed (handles changed downloadUrls)
+        // Movies: use strict matching to avoid false positives (e.g., "Toy Story 5" → "Toy Story 1995")
+        // Series: use asymmetric matching to handle episode name variations
         let smartMatchedHistory = null;
         if (!historySlot && !prefetchedInHistory && historyByTitle.size > 0 && result.title) {
+          const isSeriesType = type === 'series';
           const smartMatches = findMatchingHistoryItems(result.title, historyByTitle, {
-            minSimilarity: 0.85, // Higher threshold for individual result matching
-            requireAllWords: false, // Don't require all words - release titles vary
+            minSimilarity: isSeriesType ? 0.75 : 0.85,
+            requireAllWords: !isSeriesType, // Strict for movies, asymmetric for series
           });
           if (smartMatches.length > 0) {
             smartMatchedHistory = smartMatches[0].entry;
