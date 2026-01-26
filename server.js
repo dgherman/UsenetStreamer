@@ -1294,6 +1294,7 @@ async function streamHandler(req, res) {
 
           if (historyMatch) {
             console.log(`[INSTANT CACHE] Found cached entry, skipping indexer search: ${instantEntry.jobName}`);
+            console.log(`[INSTANT CACHE DEBUG] History has ${historyCheck.size} items for category: ${categoryForInstant}`);
             const tokenSegment = ADDON_SHARED_SECRET ? `/${ADDON_SHARED_SECRET}` : '';
             const addonBaseUrl = ADDON_BASE_URL.replace(/\/$/, '');
 
