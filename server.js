@@ -695,6 +695,7 @@ let TRIAGE_ARCHIVE_SAMPLE_COUNT = toPositiveInt(process.env.NZB_TRIAGE_ARCHIVE_S
 let TRIAGE_REUSE_POOL = toBoolean(process.env.NZB_TRIAGE_REUSE_POOL, true);
 let TRIAGE_NNTP_KEEP_ALIVE_MS = toPositiveInt(process.env.NZB_TRIAGE_NNTP_KEEP_ALIVE_MS, 0);
 let TRIAGE_PREFETCH_FIRST_VERIFIED = toBoolean(process.env.NZB_TRIAGE_PREFETCH_FIRST_VERIFIED, true);
+let TRIAGE_PREFETCH_COUNT = toPositiveInt(process.env.NZB_PREFETCH_COUNT, 1); // How many candidates to prefetch (1-3 recommended)
 
 let TRIAGE_BASE_OPTIONS = {
   archiveDirs: TRIAGE_ARCHIVE_DIRS,
@@ -849,6 +850,8 @@ function rebuildRuntimeConfig({ log = true } = {}) {
   TRIAGE_ARCHIVE_SAMPLE_COUNT = toPositiveInt(process.env.NZB_TRIAGE_ARCHIVE_SAMPLE_COUNT, 1);
   TRIAGE_REUSE_POOL = toBoolean(process.env.NZB_TRIAGE_REUSE_POOL, true);
   TRIAGE_NNTP_KEEP_ALIVE_MS = toPositiveInt(process.env.NZB_TRIAGE_NNTP_KEEP_ALIVE_MS, 0);
+  TRIAGE_PREFETCH_FIRST_VERIFIED = toBoolean(process.env.NZB_TRIAGE_PREFETCH_FIRST_VERIFIED, true);
+  TRIAGE_PREFETCH_COUNT = toPositiveInt(process.env.NZB_PREFETCH_COUNT, 1);
   TRIAGE_BASE_OPTIONS = {
     archiveDirs: TRIAGE_ARCHIVE_DIRS,
     maxDecodedBytes: TRIAGE_MAX_DECODED_BYTES,
@@ -926,6 +929,7 @@ const ADMIN_CONFIG_KEYS = [
   'NZB_TRIAGE_DOWNLOAD_CONCURRENCY',
   'NZB_TRIAGE_MAX_CONNECTIONS',
   'NZB_TRIAGE_PREFETCH_FIRST_VERIFIED',
+  'NZB_PREFETCH_COUNT',
   'NZB_TRIAGE_MAX_PARALLEL_NZBS',
   'NZB_TRIAGE_STAT_SAMPLE_COUNT',
   'NZB_TRIAGE_ARCHIVE_SAMPLE_COUNT',
@@ -2430,8 +2434,7 @@ async function streamHandler(req, res) {
     const shouldAttemptTriage = triageCandidatesToRun.length > 0 && !requestedDisable && !shouldSkipTriageForRequest && (requestedEnable || TRIAGE_ENABLED);
     let triageOutcome = null;
     let triageCompleteForCache = !shouldAttemptTriage;
-    let prefetchCandidate = null;
-    let prefetchNzbPayload = null;
+    let prefetchCandidates = []; // Array of candidates to prefetch (up to TRIAGE_PREFETCH_COUNT)
 
     if (shouldAttemptTriage) {
       if (!TRIAGE_NNTP_CONFIG) {
@@ -2528,39 +2531,39 @@ async function streamHandler(req, res) {
         }
       });
 
-      // Language-aware prefetch: prefer candidates matching user's preferred language
-      if (!prefetchCandidate && verifiedCandidates.length > 0) {
-        // First try to find a candidate matching preferred language
-        if (resolvedPreferredLanguages.length > 0) {
-          const languageMatch = verifiedCandidates.find((c) => getPreferredLanguageMatch(c, resolvedPreferredLanguages));
-          if (languageMatch) {
-            prefetchCandidate = {
-              downloadUrl: languageMatch.downloadUrl,
-              title: languageMatch.title,
-              category: categoryForType,
-              requestedEpisode,
-            };
-            console.log(`[PREFETCH] Selected language-matched candidate: ${languageMatch.title}`);
-          }
-        }
-        // Fall back to first verified candidate if no language match
-        if (!prefetchCandidate) {
-          const fallback = verifiedCandidates[0];
-          prefetchCandidate = {
-            downloadUrl: fallback.downloadUrl,
-            title: fallback.title,
+      // Language-aware multi-prefetch: prefer candidates matching user's preferred language
+      if (prefetchCandidates.length === 0 && verifiedCandidates.length > 0) {
+        // Sort candidates: language matches first, then others
+        const sortedCandidates = [...verifiedCandidates].sort((a, b) => {
+          const aMatch = resolvedPreferredLanguages.length > 0 && getPreferredLanguageMatch(a, resolvedPreferredLanguages);
+          const bMatch = resolvedPreferredLanguages.length > 0 && getPreferredLanguageMatch(b, resolvedPreferredLanguages);
+          if (aMatch && !bMatch) return -1;
+          if (!aMatch && bMatch) return 1;
+          return 0;
+        });
+
+        // Take up to TRIAGE_PREFETCH_COUNT candidates
+        const count = Math.min(TRIAGE_PREFETCH_COUNT, sortedCandidates.length);
+        for (let i = 0; i < count; i++) {
+          const candidate = sortedCandidates[i];
+          prefetchCandidates.push({
+            downloadUrl: candidate.downloadUrl,
+            title: candidate.title,
             category: categoryForType,
             requestedEpisode,
-          };
-          console.log(`[PREFETCH] Selected fallback candidate: ${fallback.title}`);
+          });
+        }
+        if (prefetchCandidates.length > 0) {
+          const titles = prefetchCandidates.map(c => c.title).join(', ');
+          console.log(`[PREFETCH] Selected ${prefetchCandidates.length} candidate(s): ${titles}`);
         }
       }
     } else if (triageDecisions && triageDecisions.size > 0) {
-      // If prefetch is enabled, capture first verified NZB payload even when triage cache completion criteria aren't met
+      // If prefetch is enabled, capture verified NZB payloads even when triage cache completion criteria aren't met
       // Uses language-aware selection: prefer candidates matching user's preferred language
       // NOTE: This must run BEFORE deleting nzbPayload from decisions
-      if (TRIAGE_PREFETCH_FIRST_VERIFIED && STREAMING_MODE !== 'native' && !prefetchCandidate) {
-        // Collect all verified, non-blocklisted candidates
+      if (TRIAGE_PREFETCH_FIRST_VERIFIED && STREAMING_MODE !== 'native' && prefetchCandidates.length === 0) {
+        // Collect all verified, non-blocklisted candidates with their payloads
         const earlyVerifiedCandidates = [];
         for (const candidate of triageEligibleResults) {
           const decision = triageDecisions.get(candidate.downloadUrl);
@@ -2573,40 +2576,41 @@ async function streamHandler(req, res) {
           }
         }
 
-        // Language-aware selection
-        let selectedEntry = null;
         if (earlyVerifiedCandidates.length > 0) {
-          // First try to find a candidate matching preferred language
-          if (resolvedPreferredLanguages.length > 0) {
-            selectedEntry = earlyVerifiedCandidates.find((e) => getPreferredLanguageMatch(e.candidate, resolvedPreferredLanguages));
-            if (selectedEntry) {
-              console.log(`[PREFETCH] Selected language-matched candidate (early): ${selectedEntry.candidate.title}`);
-            }
-          }
-          // Fall back to first verified candidate if no language match
-          if (!selectedEntry) {
-            selectedEntry = earlyVerifiedCandidates[0];
-          }
-        }
-
-        if (selectedEntry) {
-          const { candidate, decision } = selectedEntry;
-          prefetchCandidate = {
-            downloadUrl: candidate.downloadUrl,
-            title: candidate.title,
-            category: categoryForType,
-            requestedEpisode,
-          };
-          prefetchNzbPayload = decision.nzbPayload;
-          cache.cacheVerifiedNzbPayload(candidate.downloadUrl, decision.nzbPayload, {
-            title: decision.title || candidate.title,
-            size: candidate.size,
-            fileName: candidate.title,
+          // Sort by language preference
+          const sortedCandidates = [...earlyVerifiedCandidates].sort((a, b) => {
+            const aMatch = resolvedPreferredLanguages.length > 0 && getPreferredLanguageMatch(a.candidate, resolvedPreferredLanguages);
+            const bMatch = resolvedPreferredLanguages.length > 0 && getPreferredLanguageMatch(b.candidate, resolvedPreferredLanguages);
+            if (aMatch && !bMatch) return -1;
+            if (!aMatch && bMatch) return 1;
+            return 0;
           });
-          delete decision.nzbPayload;
+
+          // Take up to TRIAGE_PREFETCH_COUNT candidates
+          const count = Math.min(TRIAGE_PREFETCH_COUNT, sortedCandidates.length);
+          for (let i = 0; i < count; i++) {
+            const { candidate, decision } = sortedCandidates[i];
+            prefetchCandidates.push({
+              downloadUrl: candidate.downloadUrl,
+              title: candidate.title,
+              category: categoryForType,
+              requestedEpisode,
+            });
+            // Cache the NZB payload for prefetch
+            cache.cacheVerifiedNzbPayload(candidate.downloadUrl, decision.nzbPayload, {
+              title: decision.title || candidate.title,
+              size: candidate.size,
+              fileName: candidate.title,
+            });
+            delete decision.nzbPayload;
+          }
+          if (prefetchCandidates.length > 0) {
+            const titles = prefetchCandidates.map(c => c.title).join(', ');
+            console.log(`[PREFETCH] Selected ${prefetchCandidates.length} candidate(s) (early): ${titles}`);
+          }
         } else {
           // Fallback: If no verified candidates, select best unverified candidate for prefetch
-          // This gives the user something to try rather than nothing
+          // This gives the user something to try rather than nothing (only prefetch 1 unverified)
           const unverifiedCandidates = [];
           for (const candidate of triageEligibleResults) {
             const decision = triageDecisions.get(candidate.downloadUrl);
@@ -2620,7 +2624,7 @@ async function streamHandler(req, res) {
           }
 
           if (unverifiedCandidates.length > 0) {
-            // Language-aware selection for unverified candidates
+            // Language-aware selection for unverified candidates (only pick 1)
             let unverifiedEntry = null;
             if (resolvedPreferredLanguages.length > 0) {
               unverifiedEntry = unverifiedCandidates.find((e) => getPreferredLanguageMatch(e.candidate, resolvedPreferredLanguages));
@@ -2630,13 +2634,12 @@ async function streamHandler(req, res) {
             }
 
             const { candidate, decision } = unverifiedEntry;
-            prefetchCandidate = {
+            prefetchCandidates.push({
               downloadUrl: candidate.downloadUrl,
               title: candidate.title,
               category: categoryForType,
               requestedEpisode,
-            };
-            prefetchNzbPayload = decision.nzbPayload;
+            });
             // Cache unverified NZB payload too - it might work
             cache.cacheVerifiedNzbPayload(candidate.downloadUrl, decision.nzbPayload, {
               title: decision.title || candidate.title,
@@ -2657,8 +2660,8 @@ async function streamHandler(req, res) {
       });
     }
 
-      // Log when prefetch is enabled but no candidate found (likely all blocklisted)
-      if (TRIAGE_PREFETCH_FIRST_VERIFIED && STREAMING_MODE !== 'native' && !prefetchCandidate && triageDecisions && triageDecisions.size > 0) {
+      // Log when prefetch is enabled but no candidates found (likely all blocklisted)
+      if (TRIAGE_PREFETCH_FIRST_VERIFIED && STREAMING_MODE !== 'native' && prefetchCandidates.length === 0 && triageDecisions && triageDecisions.size > 0) {
         const verifiedCount = Array.from(triageDecisions.values()).filter(d => d.status === 'verified').length;
         if (verifiedCount > 0) {
           console.log(`[NZBDAV] Prefetch skipped - ${verifiedCount} verified candidate(s) all blocklisted (remux/iso/etc)`);
@@ -3084,16 +3087,24 @@ async function streamHandler(req, res) {
 
     res.json(responsePayload);
 
-    if (TRIAGE_PREFETCH_FIRST_VERIFIED && STREAMING_MODE !== 'native' && prefetchCandidate) {
+    // Prefetch multiple candidates (configurable via NZB_PREFETCH_COUNT)
+    if (TRIAGE_PREFETCH_FIRST_VERIFIED && STREAMING_MODE !== 'native' && prefetchCandidates.length > 0) {
       prunePrefetchedNzbdavJobs();
-      // Skip prefetch if already in nzbdav2 history (instant playback available)
-      const prefetchNormalizedTitle = normalizeReleaseTitle(prefetchCandidate.title);
-      const alreadyInHistory = prefetchNormalizedTitle && historyByTitle && historyByTitle.has(prefetchNormalizedTitle);
-      if (alreadyInHistory) {
-        console.log(`[NZBDAV] Skipping prefetch - already in history: ${prefetchCandidate.title}`);
-      } else if (prefetchedNzbdavJobs.has(prefetchCandidate.downloadUrl)) {
-        // Prefetch already running or completed for this download URL
-      } else {
+      let prefetchedCount = 0;
+
+      for (const prefetchCandidate of prefetchCandidates) {
+        // Skip prefetch if already in nzbdav2 history (instant playback available)
+        const prefetchNormalizedTitle = normalizeReleaseTitle(prefetchCandidate.title);
+        const alreadyInHistory = prefetchNormalizedTitle && historyByTitle && historyByTitle.has(prefetchNormalizedTitle);
+        if (alreadyInHistory) {
+          console.log(`[NZBDAV] Skipping prefetch - already in history: ${prefetchCandidate.title}`);
+          continue;
+        }
+        if (prefetchedNzbdavJobs.has(prefetchCandidate.downloadUrl)) {
+          // Prefetch already running or completed for this download URL
+          continue;
+        }
+
         const jobPromise = new Promise((resolve, reject) => {
           setImmediate(async () => {
             try {
@@ -3124,28 +3135,36 @@ async function streamHandler(req, res) {
           title: String(prefetchCandidate.title || '').slice(0, 60),
         });
         prefetchedNzbdavJobs.set(prefetchCandidate.downloadUrl, { promise: jobPromise, createdAt: Date.now() });
+        prefetchedCount++;
 
-        jobPromise
-          .then((jobInfo) => {
-            console.log('[PREFETCH DEBUG] Prefetch completed', {
-              downloadUrl: String(prefetchCandidate.downloadUrl || '').slice(0, 80),
-              nzoId: jobInfo.nzoId,
-              jobName: String(jobInfo.jobName || '').slice(0, 60),
+        // Closure to capture prefetchCandidate for the promise handlers
+        ((candidate) => {
+          jobPromise
+            .then((jobInfo) => {
+              console.log('[PREFETCH DEBUG] Prefetch completed', {
+                downloadUrl: String(candidate.downloadUrl || '').slice(0, 80),
+                nzoId: jobInfo.nzoId,
+                jobName: String(jobInfo.jobName || '').slice(0, 60),
+              });
+              prefetchedNzbdavJobs.set(candidate.downloadUrl, jobInfo);
+              // Also track in in-flight downloads so findMatchingQueueJob can find it
+              nzbdavService.trackInFlightDownload(
+                candidate.title,
+                jobInfo.nzoId,
+                candidate.downloadUrl,
+                candidate.category
+              );
+              console.log(`[NZBDAV] Prefetched NZB queued (nzoId=${jobInfo.nzoId})`);
+            })
+            .catch((prefetchError) => {
+              prefetchedNzbdavJobs.delete(candidate.downloadUrl);
+              console.warn(`[NZBDAV] Prefetch failed for ${candidate.title}:`, prefetchError.message);
             });
-            prefetchedNzbdavJobs.set(prefetchCandidate.downloadUrl, jobInfo);
-            // Also track in in-flight downloads so findMatchingQueueJob can find it
-            nzbdavService.trackInFlightDownload(
-              prefetchCandidate.title,
-              jobInfo.nzoId,
-              prefetchCandidate.downloadUrl,
-              prefetchCandidate.category
-            );
-            console.log(`[NZBDAV] Prefetched first verified NZB queued (nzoId=${jobInfo.nzoId})`);
-          })
-          .catch((prefetchError) => {
-            prefetchedNzbdavJobs.delete(prefetchCandidate.downloadUrl);
-            console.warn('[NZBDAV] Prefetch of first verified NZB failed:', prefetchError.message);
-          });
+        })(prefetchCandidate);
+      }
+
+      if (prefetchedCount > 0) {
+        console.log(`[NZBDAV] Prefetching ${prefetchedCount} candidate(s)`);
       }
     }
   } catch (error) {

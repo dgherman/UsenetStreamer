@@ -83,17 +83,20 @@ It does NOT help with slow downloads where Stremio gives up waiting.
 
 ---
 
-### 4. Prefetch multiple candidates
+### 4. Prefetch multiple candidates - IMPLEMENTED
 
-**Current behavior:** Only the first verified candidate is prefetched.
+**Status:** Implemented
 
-**Proposed:** Prefetch top N verified candidates (configurable, default 2-3) so backups are ready.
+**Behavior:** Prefetches top N verified candidates (configurable) so backup downloads are ready if the first one fails.
 
-**Implementation:**
-- Add `NZB_PREFETCH_COUNT` environment variable (default: 1 for current behavior)
-- Modify prefetch loop to queue multiple candidates
-- Track all prefetched jobs in `prefetchedNzbdavJobs` and `inFlightDownloads`
-- Consider download queue depth to avoid overwhelming nzbdav2
+**Configuration:**
+- `NZB_PREFETCH_COUNT`: Number of candidates to prefetch (default: 1 for current behavior, recommended: 2-3)
+
+**Implementation details:**
+- Candidates are sorted by language preference before selection
+- Each candidate is tracked in `prefetchedNzbdavJobs` and `inFlightDownloads`
+- Candidates already in history or already prefetching are skipped
+- Unverified fallback only prefetches 1 candidate (to be conservative)
 
 **Benefit:** If the first download fails, the backup is already downloading or complete, enabling faster fallback.
 
@@ -203,8 +206,8 @@ NZB_BLOCKLIST_PATTERNS=remux,/\.iso$/i,bdmv,disc
 | 2. Automatic fallback | High | Medium | P1 | DONE |
 | 2b. Unverified candidate handling | High | Low | P1 | DONE |
 | 3. Negative caching | Medium | Low | P2 | DONE |
-| 7. Configurable blocklist | Low | Low | P2 | |
-| 8. Health check endpoint | Low | Low | P2 | |
-| 4. Prefetch multiple | Medium | Medium | P3 | |
-| 6. Admin dashboard stats | Low | Medium | P3 | |
+| 4. Prefetch multiple | Medium | Medium | P2 | DONE |
+| 6. Admin dashboard stats | Low | Medium | P2 | DONE |
+| 7. Configurable blocklist | Low | Low | P3 | |
+| 8. Health check endpoint | Low | Low | P3 | |
 | 5. Smarter history matching | Medium | High | P4 | |
