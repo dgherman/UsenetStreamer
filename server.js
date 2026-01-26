@@ -1303,8 +1303,8 @@ async function streamHandler(req, res) {
             // Use smart history matching to find ALL related items
             const debugMatching = process.env.DEBUG_HISTORY_MATCHING === 'true';
             const matchingItems = findMatchingHistoryItems(instantEntry.jobName, historyCheck, {
-              minSimilarity: 0.5, // Lower threshold to catch releases with different naming
-              requireAllWords: false,
+              minSimilarity: 0.8,
+              requireAllWords: true, // All search words must be in history title to avoid false matches
               debug: debugMatching,
             });
 
@@ -3134,8 +3134,8 @@ async function streamHandler(req, res) {
 
       // Use smart history matching to find related items
       const matchingItems = findMatchingHistoryItems(searchTitle, historyByTitle, {
-        minSimilarity: 0.5,
-        requireAllWords: false,
+        minSimilarity: 0.8,
+        requireAllWords: true, // All search words must be in history title to avoid false matches
         debug: debugMatching,
       });
 
