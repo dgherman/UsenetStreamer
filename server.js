@@ -1319,6 +1319,12 @@ async function streamHandler(req, res) {
             const instantStreams = [];
             for (const match of matchingItems) {
               const historyEntry = match.entry;
+
+              // For series: filter by requested episode to avoid showing all episodes as instant
+              if (type === 'series' && requestedEpisode && !fileMatchesEpisode(historyEntry.jobName, requestedEpisode)) {
+                continue;
+              }
+
               const streamUrl = `${addonBaseUrl}${tokenSegment}/nzb/stream?` + new URLSearchParams({
                 downloadUrl: historyEntry.nzoId === historyMatch.nzoId ? (instantEntry.downloadUrl || '') : '',
                 type,
@@ -2853,8 +2859,13 @@ async function streamHandler(req, res) {
             minSimilarity: isSeriesType ? 0.75 : 0.85,
             requireAllWords: !isSeriesType, // Strict for movies, asymmetric for series
           });
-          if (smartMatches.length > 0) {
-            smartMatchedHistory = smartMatches[0].entry;
+          // For series: filter matches by requested episode to avoid cross-episode matching
+          for (const match of smartMatches) {
+            if (isSeriesType && requestedEpisode && !fileMatchesEpisode(match.entry.jobName, requestedEpisode)) {
+              continue;
+            }
+            smartMatchedHistory = match.entry;
+            break;
           }
         }
         const isInstant = Boolean(historySlot) || Boolean(prefetchedInHistory) || Boolean(smartMatchedHistory);
@@ -3171,6 +3182,11 @@ async function streamHandler(req, res) {
 
         // Skip if already matched by an indexer result
         if (matchedNormalizedTitles.has(normalizedHistoryTitle)) continue;
+
+        // For series: filter by requested episode to avoid showing all episodes as instant
+        if (type === 'series' && requestedEpisode && !fileMatchesEpisode(historyEntry.jobName, requestedEpisode)) {
+          continue;
+        }
 
         // Create an instant stream for this history item
         const tokenSegment = ADDON_SHARED_SECRET ? `/${ADDON_SHARED_SECRET}` : '';
