@@ -284,14 +284,17 @@ async function checkUsenet(config) {
         settled = true;
         clearTimeout(timer);
         cleanup();
+        // Forcefully destroy the socket instead of graceful quit
+        // The NNTP library has a race condition where late server data
+        // after quit() causes "Cannot read properties of undefined (reading 'cb')"
         try {
-          if (reachedReady && typeof client.quit === 'function') {
-            client.quit(() => client.end());
+          if (client._sock && typeof client._sock.destroy === 'function') {
+            client._sock.destroy();
           } else if (typeof client.end === 'function') {
             client.end();
           }
         } catch {
-          try { client.end(); } catch { /* noop */ }
+          /* ignore cleanup errors */
         }
         if (err) reject(err);
         else resolve();
@@ -329,6 +332,11 @@ async function checkUsenet(config) {
         });
         if (streamRef && typeof streamRef.on === 'function') {
           streamRef.on('error', onError);
+        }
+        // Also attach error handler to internal socket to catch late errors
+        // that occur after we've already settled (prevents process crash)
+        if (client._sock && typeof client._sock.on === 'function') {
+          client._sock.on('error', () => { /* swallow late errors */ });
         }
       } catch (err) {
         finalize(err);
