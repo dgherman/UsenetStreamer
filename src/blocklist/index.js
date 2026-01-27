@@ -135,6 +135,7 @@ function createBlocklistChecker(patterns) {
   if (!patterns || patterns.length === 0) {
     return {
       isBlocked: () => ({ blocked: false, category: null, pattern: null }),
+      test: () => false,
       patterns: [],
       enabled: false,
     };
@@ -158,6 +159,14 @@ function createBlocklistChecker(patterns) {
       }
 
       return { blocked: false, category: null, pattern: null };
+    },
+    /**
+     * Simple boolean test if a title is blocked (convenience wrapper)
+     * @param {string} title - Release title to check
+     * @returns {boolean}
+     */
+    test(title) {
+      return this.isBlocked(title).blocked;
     },
     patterns,
     enabled: true,
