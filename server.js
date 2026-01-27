@@ -2657,7 +2657,7 @@ async function streamHandler(req, res) {
             fileName: candidate.title,
           });
           // Skip blocklisted candidates for prefetch
-          const isBlocklisted = RELEASE_BLOCKLIST_REGEX.test(candidate.title) || REMUX_BLOCKLIST_REGEX.test(candidate.title) || ADULT_BLOCKLIST_REGEX.test(candidate.title);
+          const isBlocklisted = BLOCKLIST_CHECKER.test(candidate.title);
           if (STREAMING_MODE !== 'native' && !isBlocklisted) {
             verifiedCandidates.push(candidate);
           }
@@ -2705,7 +2705,7 @@ async function streamHandler(req, res) {
           const decision = triageDecisions.get(candidate.downloadUrl);
           if (decision && decision.status === 'verified' && typeof decision.nzbPayload === 'string') {
             // Skip blocklisted candidates for prefetch
-            if (RELEASE_BLOCKLIST_REGEX.test(candidate.title) || REMUX_BLOCKLIST_REGEX.test(candidate.title) || ADULT_BLOCKLIST_REGEX.test(candidate.title)) {
+            if (BLOCKLIST_CHECKER.test(candidate.title)) {
               continue;
             }
             earlyVerifiedCandidates.push({ candidate, decision });
@@ -2752,7 +2752,7 @@ async function streamHandler(req, res) {
             const decision = triageDecisions.get(candidate.downloadUrl);
             if (decision && decision.status === 'unverified' && typeof decision.nzbPayload === 'string') {
               // Skip blocklisted candidates
-              if (RELEASE_BLOCKLIST_REGEX.test(candidate.title) || REMUX_BLOCKLIST_REGEX.test(candidate.title) || ADULT_BLOCKLIST_REGEX.test(candidate.title)) {
+              if (BLOCKLIST_CHECKER.test(candidate.title)) {
                 continue;
               }
               unverifiedCandidates.push({ candidate, decision });
@@ -2857,7 +2857,7 @@ async function streamHandler(req, res) {
     const verifiedFallbackCandidates = finalNzbResults
       .filter((r) => {
         if (!r.downloadUrl) return false;
-        if (r.title && (RELEASE_BLOCKLIST_REGEX.test(r.title) || REMUX_BLOCKLIST_REGEX.test(r.title) || ADULT_BLOCKLIST_REGEX.test(r.title))) return false;
+        if (r.title && BLOCKLIST_CHECKER.test(r.title)) return false;
         const decision = triageDecisions.get(r.downloadUrl);
         return decision?.status === 'verified';
       })
@@ -3550,7 +3550,7 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
   }
 
   // Block unwanted release types at stream level (catches cached/stale results)
-  if (title && (RELEASE_BLOCKLIST_REGEX.test(title) || REMUX_BLOCKLIST_REGEX.test(title) || ADULT_BLOCKLIST_REGEX.test(title))) {
+  if (title && BLOCKLIST_CHECKER.test(title)) {
     console.log(`[NZBDAV] Blocked stream request for blocklisted release: ${title}`);
     res.status(403).json({ error: 'This release type is blocked (remux/iso/adult/etc)' });
     return;
