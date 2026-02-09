@@ -2,7 +2,7 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, upstream-sync-*]
   workflow_dispatch:
 
 env:
@@ -38,6 +38,7 @@ jobs:
           tags: |
             type=sha,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=test,enable=${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Build and push
         uses: docker/build-push-action@v5
