@@ -3439,8 +3439,13 @@ async function streamHandler(req, res) {
 
       for (const prefetchCandidate of prefetchCandidates) {
         // Skip prefetch if already in nzbdav2 history (instant playback available)
+        // Use fuzzy matching because NzbDAV2 truncates job names (~100 chars),
+        // so exact normalized-title lookup misses entries with long names.
         const prefetchNormalizedTitle = normalizeReleaseTitle(prefetchCandidate.title);
-        const alreadyInHistory = prefetchNormalizedTitle && historyByTitle && historyByTitle.has(prefetchNormalizedTitle);
+        const alreadyInHistory = prefetchNormalizedTitle && historyByTitle && (
+          historyByTitle.has(prefetchNormalizedTitle) ||
+          findMatchingHistoryItems(prefetchCandidate.title, historyByTitle, { minSimilarity: 0.8 }).length > 0
+        );
         if (alreadyInHistory) {
           console.log(`[NZBDAV] Skipping prefetch - already in history: ${prefetchCandidate.title}`);
           continue;
