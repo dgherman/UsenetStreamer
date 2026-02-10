@@ -1463,6 +1463,13 @@
       loadConfiguration();
     }
   }
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js', { scope: './' }).catch(() => {
+        // ignore service worker registration errors
+      });
+    });
+  }
   syncHealthControls();
   syncSortingControls();
   syncStreamingModeControls();

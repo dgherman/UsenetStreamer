@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { parseStringPromise: parseXmlString } = require('xml2js');
 const { stripTrailingSlashes } = require('../utils/config');
+const { getRandomUserAgent } = require('../utils/userAgent');
 
 const MAX_NEWZNAB_INDEXERS = 20;
 const NEWZNAB_FIELD_SUFFIXES = ['ENDPOINT', 'API_KEY', 'API_PATH', 'NAME', 'INDEXER_ENABLED', 'PAID'];
@@ -526,6 +527,7 @@ async function fetchIndexerResults(config, plan, options) {
 
   const response = await axios.get(requestUrl, {
     params,
+    headers: { 'User-Agent': getRandomUserAgent() },
     timeout: options.timeoutMs || DEFAULT_REQUEST_TIMEOUT_MS,
     responseType: 'text',
     validateStatus: () => true,
@@ -648,6 +650,7 @@ async function testNewznabCaps(config, options = {}) {
 
   const response = await axios.get(requestUrl, {
     params,
+    headers: { 'User-Agent': getRandomUserAgent() },
     timeout: options.timeoutMs || 12000,
     responseType: 'text',
     validateStatus: () => true,
