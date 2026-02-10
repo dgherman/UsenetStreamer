@@ -1020,31 +1020,26 @@
   const cacheEntriesTypeSelect = document.getElementById('cacheEntriesType');
   const loadCacheEntriesButton = document.getElementById('loadCacheEntries');
   const cacheEntriesList = document.getElementById('cacheEntriesList');
+  const cacheStatStream = document.getElementById('cacheStatStream');
+  const cacheStatNzb = document.getElementById('cacheStatNzb');
+  const cacheStatNzbdav = document.getElementById('cacheStatNzbdav');
+  const cacheStatInstant = document.getElementById('cacheStatInstant');
+  const cacheStatNegative = document.getElementById('cacheStatNegative');
 
   async function loadCacheStats() {
     try {
       const data = await apiRequest('/admin/api/cache/stats');
       if (data.status === 'ok' && data.stats) {
         const stats = data.stats;
-        // Update stream cache
-        const streamEl = document.getElementById('cacheStatStream');
-        if (streamEl) streamEl.textContent = stats.stream?.entries ?? '-';
-        // Update NZB cache
-        const nzbEl = document.getElementById('cacheStatNzb');
-        if (nzbEl) nzbEl.textContent = stats.nzb?.entries ?? '-';
-        // Update NZBDav cache
-        const nzbdavEl = document.getElementById('cacheStatNzbdav');
-        if (nzbdavEl) {
+        if (cacheStatStream) cacheStatStream.textContent = stats.stream?.entries ?? '-';
+        if (cacheStatNzb) cacheStatNzb.textContent = stats.nzb?.entries ?? '-';
+        if (cacheStatNzbdav) {
           const nzbdav = stats.nzbdav || {};
           const byStatus = nzbdav.byStatus || {};
-          nzbdavEl.textContent = `${byStatus.ready || 0}/${byStatus.pending || 0}/${byStatus.failed || 0}`;
+          cacheStatNzbdav.textContent = `${byStatus.ready || 0}/${byStatus.pending || 0}/${byStatus.failed || 0}`;
         }
-        // Update instant cache
-        const instantEl = document.getElementById('cacheStatInstant');
-        if (instantEl) instantEl.textContent = stats.instant?.entries ?? '-';
-        // Update negative cache
-        const negativeEl = document.getElementById('cacheStatNegative');
-        if (negativeEl) negativeEl.textContent = stats.nzbdav?.negativeCache?.entries ?? '-';
+        if (cacheStatInstant) cacheStatInstant.textContent = stats.instant?.entries ?? '-';
+        if (cacheStatNegative) cacheStatNegative.textContent = stats.nzbdav?.negativeCache?.entries ?? '-';
       }
     } catch (error) {
       console.error('Failed to load cache stats:', error);
@@ -1128,25 +1123,6 @@
           }
           return '';
         }).join('');
-
-        // Add delete handlers
-        cacheEntriesList.querySelectorAll('[data-delete-entry]').forEach(btn => {
-          btn.addEventListener('click', async () => {
-            const entryType = btn.dataset.deleteEntry;
-            const key = btn.dataset.entryKey;
-            const url = btn.dataset.entryUrl;
-            try {
-              await apiRequest('/admin/api/cache/entry', {
-                method: 'DELETE',
-                body: JSON.stringify({ type: entryType, key, url }),
-              });
-              btn.closest('.cache-entry-item').remove();
-              await loadCacheStats();
-            } catch (error) {
-              alert(`Failed to delete entry: ${error.message}`);
-            }
-          });
-        });
       }
     } catch (error) {
       cacheEntriesList.innerHTML = `<p class="cache-entries-empty">Error: ${error.message}</p>`;
@@ -1191,6 +1167,27 @@
       loadCacheEntriesButton.addEventListener('click', loadCacheEntries);
     }
 
+    // Delegated handler for cache entry delete buttons
+    if (cacheEntriesList) {
+      cacheEntriesList.addEventListener('click', async (e) => {
+        const btn = e.target.closest('[data-delete-entry]');
+        if (!btn) return;
+        const entryType = btn.dataset.deleteEntry;
+        const key = btn.dataset.entryKey;
+        const url = btn.dataset.entryUrl;
+        try {
+          await apiRequest('/admin/api/cache/entry', {
+            method: 'DELETE',
+            body: JSON.stringify({ type: entryType, key, url }),
+          });
+          btn.closest('.cache-entry-item').remove();
+          await loadCacheStats();
+        } catch (error) {
+          alert(`Failed to delete entry: ${error.message}`);
+        }
+      });
+    }
+
     // Load stats on init
     loadCacheStats();
   }
@@ -1199,6 +1196,17 @@
   const statsActionStatus = document.getElementById('statsActionStatus');
   const refreshOperationalStatsButton = document.getElementById('refreshOperationalStats');
   const resetOperationalStatsButton = document.getElementById('resetOperationalStats');
+  const statUptime = document.getElementById('statUptime');
+  const statRequests = document.getElementById('statRequests');
+  const statRequestsBreakdown = document.getElementById('statRequestsBreakdown');
+  const statInstantRate = document.getElementById('statInstantRate');
+  const statInstantHints = document.getElementById('statInstantHints');
+  const statPrefetchRate = document.getElementById('statPrefetchRate');
+  const statPrefetchHints = document.getElementById('statPrefetchHints');
+  const statTriageRate = document.getElementById('statTriageRate');
+  const statTriageHints = document.getElementById('statTriageHints');
+  const statBlocklistTotal = document.getElementById('statBlocklistTotal');
+  const statBlocklistHints = document.getElementById('statBlocklistHints');
 
   function formatUptime(hours) {
     if (hours < 1) {
@@ -1224,59 +1232,48 @@
         const s = data.stats;
 
         // Uptime
-        const uptimeEl = document.getElementById('statUptime');
-        if (uptimeEl) uptimeEl.textContent = formatUptime(s.uptime?.uptimeHours || 0);
+        if (statUptime) statUptime.textContent = formatUptime(s.uptime?.uptimeHours || 0);
 
         // Requests
-        const requestsEl = document.getElementById('statRequests');
-        if (requestsEl) requestsEl.textContent = s.requests?.total || 0;
-        const requestsBreakdownEl = document.getElementById('statRequestsBreakdown');
-        if (requestsBreakdownEl) {
-          requestsBreakdownEl.textContent = `Movies: ${s.requests?.movies || 0} / Series: ${s.requests?.series || 0}`;
+        if (statRequests) statRequests.textContent = s.requests?.total || 0;
+        if (statRequestsBreakdown) {
+          statRequestsBreakdown.textContent = `Movies: ${s.requests?.movies || 0} / Series: ${s.requests?.series || 0}`;
         }
 
         // Instant Cache
-        const instantRateEl = document.getElementById('statInstantRate');
-        if (instantRateEl) {
+        if (statInstantRate) {
           const rate = s.instant?.hitRate || 0;
-          instantRateEl.textContent = formatRate(rate);
-          instantRateEl.className = 'stat-value' + (rate >= 50 ? ' good' : rate >= 20 ? '' : ' warning');
+          statInstantRate.textContent = formatRate(rate);
+          statInstantRate.className = 'stat-value' + (rate >= 50 ? ' good' : rate >= 20 ? '' : ' warning');
         }
-        const instantHintsEl = document.getElementById('statInstantHints');
-        if (instantHintsEl) {
-          instantHintsEl.textContent = `Hits: ${s.instant?.hits || 0} / Misses: ${s.instant?.misses || 0}`;
+        if (statInstantHints) {
+          statInstantHints.textContent = `Hits: ${s.instant?.hits || 0} / Misses: ${s.instant?.misses || 0}`;
         }
 
         // Prefetch
-        const prefetchRateEl = document.getElementById('statPrefetchRate');
-        if (prefetchRateEl) {
+        if (statPrefetchRate) {
           const rate = s.prefetch?.hitRate || 0;
-          prefetchRateEl.textContent = formatRate(rate);
-          prefetchRateEl.className = 'stat-value' + (rate >= 50 ? ' good' : rate >= 20 ? '' : ' warning');
+          statPrefetchRate.textContent = formatRate(rate);
+          statPrefetchRate.className = 'stat-value' + (rate >= 50 ? ' good' : rate >= 20 ? '' : ' warning');
         }
-        const prefetchHintsEl = document.getElementById('statPrefetchHints');
-        if (prefetchHintsEl) {
-          prefetchHintsEl.textContent = `Hits: ${s.prefetch?.hits || 0} / Misses: ${s.prefetch?.misses || 0} / Started: ${s.prefetch?.started || 0}`;
+        if (statPrefetchHints) {
+          statPrefetchHints.textContent = `Hits: ${s.prefetch?.hits || 0} / Misses: ${s.prefetch?.misses || 0} / Started: ${s.prefetch?.started || 0}`;
         }
 
         // Triage
-        const triageRateEl = document.getElementById('statTriageRate');
-        if (triageRateEl) {
+        if (statTriageRate) {
           const rate = s.triage?.successRate || 0;
-          triageRateEl.textContent = formatRate(rate);
-          triageRateEl.className = 'stat-value' + (rate >= 70 ? ' good' : rate >= 40 ? '' : ' warning');
+          statTriageRate.textContent = formatRate(rate);
+          statTriageRate.className = 'stat-value' + (rate >= 70 ? ' good' : rate >= 40 ? '' : ' warning');
         }
-        const triageHintsEl = document.getElementById('statTriageHints');
-        if (triageHintsEl) {
-          triageHintsEl.textContent = `Verified: ${s.triage?.verified || 0} / Blocked: ${s.triage?.blocked || 0} / Errors: ${s.triage?.errors || 0}`;
+        if (statTriageHints) {
+          statTriageHints.textContent = `Verified: ${s.triage?.verified || 0} / Blocked: ${s.triage?.blocked || 0} / Errors: ${s.triage?.errors || 0}`;
         }
 
         // Blocklist
-        const blocklistTotalEl = document.getElementById('statBlocklistTotal');
-        if (blocklistTotalEl) blocklistTotalEl.textContent = s.blocklist?.total || 0;
-        const blocklistHintsEl = document.getElementById('statBlocklistHints');
-        if (blocklistHintsEl) {
-          blocklistHintsEl.textContent = `Remux: ${s.blocklist?.remux || 0} / ISO: ${s.blocklist?.iso || 0} / Adult: ${s.blocklist?.adult || 0}`;
+        if (statBlocklistTotal) statBlocklistTotal.textContent = s.blocklist?.total || 0;
+        if (statBlocklistHints) {
+          statBlocklistHints.textContent = `Remux: ${s.blocklist?.remux || 0} / ISO: ${s.blocklist?.iso || 0} / Adult: ${s.blocklist?.adult || 0}`;
         }
       }
     } catch (error) {
