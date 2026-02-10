@@ -3150,13 +3150,15 @@ async function streamHandler(req, res) {
           // });
         }
 
-        if (historySlot?.nzoId) {
-          baseParams.set('historyNzoId', historySlot.nzoId);
-          if (historySlot.jobName) {
-            baseParams.set('historyJobName', historySlot.jobName);
+        // Resolve history slot from exact match, prefetch, or smart match
+        const resolvedHistorySlot = historySlot || prefetchedInHistory || smartMatchedHistory;
+        if (resolvedHistorySlot?.nzoId) {
+          baseParams.set('historyNzoId', resolvedHistorySlot.nzoId);
+          if (resolvedHistorySlot.jobName) {
+            baseParams.set('historyJobName', resolvedHistorySlot.jobName);
           }
-          if (historySlot.category) {
-            baseParams.set('historyCategory', historySlot.category);
+          if (resolvedHistorySlot.category) {
+            baseParams.set('historyCategory', resolvedHistorySlot.category);
           }
         }
 
