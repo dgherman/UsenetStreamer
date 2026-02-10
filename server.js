@@ -3447,11 +3447,24 @@ async function streamHandler(req, res) {
         // Skip prefetch if already in nzbdav2 history (instant playback available)
         // Use fuzzy matching because NzbDAV2 truncates job names (~100 chars),
         // so exact normalized-title lookup misses entries with long names.
+        // For series: fuzzy matches must also match the requested episode,
+        // otherwise one downloaded episode blocks prefetch for all others
+        // (titleWords like ['family', 'guy'] are identical across episodes).
         const prefetchNormalizedTitle = normalizeReleaseTitle(prefetchCandidate.title);
-        const alreadyInHistory = prefetchNormalizedTitle && historyByTitle && (
-          historyByTitle.has(prefetchNormalizedTitle) ||
-          findMatchingHistoryItems(prefetchCandidate.title, historyByTitle, { minSimilarity: 0.8 }).length > 0
-        );
+        let alreadyInHistory = prefetchNormalizedTitle && historyByTitle && historyByTitle.has(prefetchNormalizedTitle);
+        if (!alreadyInHistory && prefetchNormalizedTitle && historyByTitle) {
+          const fuzzyMatches = findMatchingHistoryItems(prefetchCandidate.title, historyByTitle, { minSimilarity: 0.8 });
+          if (fuzzyMatches.length > 0) {
+            if (prefetchCandidate.requestedEpisode) {
+              // Series: only skip if a fuzzy match contains the same episode
+              alreadyInHistory = fuzzyMatches.some(m =>
+                fileMatchesEpisode(m.entry.jobName || m.normalizedTitle, prefetchCandidate.requestedEpisode)
+              );
+            } else {
+              alreadyInHistory = true;
+            }
+          }
+        }
         if (alreadyInHistory) {
           console.log(`[NZBDAV] Skipping prefetch - already in history: ${prefetchCandidate.title}`);
           continue;

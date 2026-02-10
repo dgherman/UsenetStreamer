@@ -156,11 +156,41 @@ async function getOrCreateNzbdavStream(cacheKey, builder) {
     if (existing.status === 'failed') {
       throw existing.error;
     }
-    // For timeout_pending status, we allow retry but the builder will check
-    // for in-flight downloads and reuse them instead of starting new ones
     if (existing.status === 'timeout_pending') {
       console.log('[CACHE] Previous request timed out, retrying (in-flight tracking will prevent duplicates)');
-      // Fall through to create new attempt
+      // Explicit CAS: transition timeout_pending → pending atomically
+      const retryPromise = (async () => {
+        const data = await builder();
+        nzbdavStreamCache.set(cacheKey, {
+          status: 'ready',
+          data,
+          expiresAt: NZBDAV_CACHE_TTL_MS > 0 ? Date.now() + NZBDAV_CACHE_TTL_MS : null
+        });
+        return data;
+      })();
+      nzbdavStreamCache.set(cacheKey, { status: 'pending', promise: retryPromise });
+      try {
+        return await retryPromise;
+      } catch (error) {
+        if (error?.isNzbdavFailure) {
+          nzbdavStreamCache.set(cacheKey, {
+            status: 'failed',
+            error,
+            expiresAt: NZBDAV_CACHE_TTL_MS > 0 ? Date.now() + NZBDAV_CACHE_TTL_MS : null
+          });
+        } else if (isTimeoutError(error)) {
+          console.log('[CACHE] Retry also timed out, marking as timeout_pending');
+          nzbdavStreamCache.set(cacheKey, {
+            status: 'timeout_pending',
+            error,
+            startedAt: Date.now(),
+            expiresAt: Date.now() + TIMEOUT_PENDING_TTL_MS
+          });
+        } else {
+          nzbdavStreamCache.delete(cacheKey);
+        }
+        throw error;
+      }
     }
   }
 

@@ -504,14 +504,15 @@ async function getWebdavClient() {
   return webdavClientPromise;
 }
 
-async function listWebdavDirectory(directory) {
+async function listWebdavDirectory(directory, { maxEntries = 500 } = {}) {
   const client = await getWebdavClient();
   const normalizedPath = normalizeNzbdavPath(directory);
   const relativePath = normalizedPath === '/' ? '/' : normalizedPath.replace(/^\/+/, '');
 
   try {
     const entries = await client.getDirectoryContents(relativePath, { deep: false });
-    return entries.map((entry) => ({
+    const capped = maxEntries > 0 && entries.length > maxEntries ? entries.slice(0, maxEntries) : entries;
+    return capped.map((entry) => ({
       name: entry?.basename ?? entry?.filename ?? '',
       isDirectory: entry?.type === 'directory',
       size: entry?.size ?? null,
