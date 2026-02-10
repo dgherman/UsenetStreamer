@@ -68,6 +68,7 @@ let BLOCKLIST_CHECKER = blocklist.buildBlocklistFromEnv(process.env.NZB_BLOCKLIS
 
 const PREFETCH_NZBDAV_JOB_TTL_MS = 60 * 60 * 1000;
 const prefetchedNzbdavJobs = new Map();
+const prefetchNzoIdIndex = new Map(); // nzoId → downloadUrl reverse index
 const TRIAGE_FINAL_STATUSES = new Set(['verified', 'blocked', 'unverified_7z']);
 
 function isTriageFinalStatus(status) {
@@ -80,6 +81,7 @@ function prunePrefetchedNzbdavJobs() {
   const cutoff = Date.now() - PREFETCH_NZBDAV_JOB_TTL_MS;
   for (const [key, entry] of prefetchedNzbdavJobs.entries()) {
     if (entry?.createdAt && entry.createdAt < cutoff) {
+      if (entry.nzoId) prefetchNzoIdIndex.delete(entry.nzoId);
       prefetchedNzbdavJobs.delete(key);
     }
   }
@@ -88,12 +90,7 @@ function prunePrefetchedNzbdavJobs() {
 // Find which downloadUrl a prefetched nzoId belongs to
 function findPrefetchedDownloadUrlByNzoId(nzoId) {
   if (!nzoId) return null;
-  for (const [downloadUrl, entry] of prefetchedNzbdavJobs.entries()) {
-    if (entry.nzoId === nzoId) {
-      return downloadUrl;
-    }
-  }
-  return null;
+  return prefetchNzoIdIndex.get(nzoId) || null;
 }
 
 async function resolvePrefetchedNzbdavJob(downloadUrl) {
@@ -107,11 +104,13 @@ async function resolvePrefetchedNzbdavJob(downloadUrl) {
       const latest = prefetchedNzbdavJobs.get(downloadUrl);
       if (latest && latest.promise === entry.promise) {
         prefetchedNzbdavJobs.set(downloadUrl, merged);
+        if (merged.nzoId) prefetchNzoIdIndex.set(merged.nzoId, downloadUrl);
       }
       return merged;
     } catch (error) {
       const latest = prefetchedNzbdavJobs.get(downloadUrl);
       if (latest && latest.promise === entry.promise) {
+        if (latest.nzoId) prefetchNzoIdIndex.delete(latest.nzoId);
         prefetchedNzbdavJobs.delete(downloadUrl);
       }
       console.warn('[NZBDAV] Prefetch job failed before reuse:', error.message || error);
@@ -2907,12 +2906,15 @@ async function streamHandler(req, res) {
 
     // Pre-pass: Reserve nzoIds for exact matches BEFORE processing smart matches
     // This prevents smart matches from claiming nzoIds that should belong to exact matches
+    // Also cache normalized titles to avoid recomputing in the main loop
     const exactMatchNzoIds = new Set();
+    const precomputedTitles = new Map();
     if (historyByTitle.size > 0) {
       for (const result of finalNzbResults) {
         if (!result.title) continue;
         const normalizedTitle = normalizeReleaseTitle(result.title);
         if (!normalizedTitle) continue;
+        precomputedTitles.set(result.downloadUrl, normalizedTitle);
         const historyEntry = historyByTitle.get(normalizedTitle);
         if (historyEntry?.nzoId && !exactMatchNzoIds.has(historyEntry.nzoId)) {
           exactMatchNzoIds.add(historyEntry.nzoId);
@@ -2977,7 +2979,7 @@ async function streamHandler(req, res) {
 
         const cacheKey = nzbdavService.buildNzbdavCacheKey(result.downloadUrl, categoryForType, requestedEpisode);
         // Cache entries are managed internally by the cache module
-        const normalizedTitle = normalizeReleaseTitle(result.title);
+        const normalizedTitle = precomputedTitles.get(result.downloadUrl) || normalizeReleaseTitle(result.title);
         let historySlot = normalizedTitle ? historyByTitle.get(normalizedTitle) : null;
         // Check if this exact match was already claimed by another result
         if (historySlot?.nzoId && claimedHistoryNzoIds.has(historySlot.nzoId)) {
@@ -2998,6 +3000,7 @@ async function streamHandler(req, res) {
         }
         // Clean up prefetched entry and mark as claimed once confirmed in history
         if (prefetchedInHistory && prefetchedEntry) {
+          if (prefetchedNzoId) prefetchNzoIdIndex.delete(prefetchedNzoId);
           prefetchedNzbdavJobs.delete(result.downloadUrl);
           if (prefetchedNzoId) {
             claimedHistoryNzoIds.add(prefetchedNzoId);
@@ -3030,6 +3033,7 @@ async function streamHandler(req, res) {
             // Clean up prefetched entry if it exists (download completed, now in history)
             const prefetchedViaUrl = findPrefetchedDownloadUrlByNzoId(match.entry.nzoId);
             if (prefetchedViaUrl) {
+              prefetchNzoIdIndex.delete(match.entry.nzoId);
               prefetchedNzbdavJobs.delete(prefetchedViaUrl);
             }
             smartMatchedHistory = match.entry;
@@ -3500,6 +3504,7 @@ async function streamHandler(req, res) {
                 jobName: String(jobInfo.jobName || '').slice(0, 60),
               });
               prefetchedNzbdavJobs.set(candidate.downloadUrl, jobInfo);
+              if (jobInfo.nzoId) prefetchNzoIdIndex.set(jobInfo.nzoId, candidate.downloadUrl);
               // Also track in in-flight downloads so findMatchingQueueJob can find it
               nzbdavService.trackInFlightDownload(
                 candidate.title,
@@ -3510,6 +3515,8 @@ async function streamHandler(req, res) {
               console.log(`[NZBDAV] Prefetched NZB queued (nzoId=${jobInfo.nzoId})`);
             })
             .catch((prefetchError) => {
+              const failing = prefetchedNzbdavJobs.get(candidate.downloadUrl);
+              if (failing?.nzoId) prefetchNzoIdIndex.delete(failing.nzoId);
               prefetchedNzbdavJobs.delete(candidate.downloadUrl);
               console.warn(`[NZBDAV] Prefetch failed for ${candidate.title}:`, prefetchError.message);
             });
@@ -3732,12 +3739,14 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
     }
 
     if (prefetchedSlotHint?.nzoId) {
-      prefetchedNzbdavJobs.set(downloadUrl, {
+      const updatedEntry = {
         ...prefetchedSlotHint,
         jobName: streamData.jobName || prefetchedSlotHint.jobName,
         category: streamData.category || prefetchedSlotHint.category,
         createdAt: Date.now(),
-      });
+      };
+      prefetchedNzbdavJobs.set(downloadUrl, updatedEntry);
+      prefetchNzoIdIndex.set(prefetchedSlotHint.nzoId, downloadUrl);
     }
 
     if ((req.method || 'GET').toUpperCase() === 'HEAD') {
@@ -3840,4 +3849,5 @@ async function restartHttpServer() {
 }
 
 startHttpServer();
+setInterval(prunePrefetchedNzbdavJobs, 5 * 60 * 1000);
 
