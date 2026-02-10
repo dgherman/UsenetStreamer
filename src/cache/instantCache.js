@@ -2,6 +2,7 @@
 // This allows skipping indexer searches entirely for already-downloaded content
 
 const fs = require('fs');
+const fsp = require('fs').promises;
 const path = require('path');
 
 // Use CONFIG_DIR if set, otherwise fall back to default config directory
@@ -24,6 +25,8 @@ const INSTANT_CACHE_TTL_MS = (() => {
 
 let instantCache = null;
 let cacheLoadedAt = 0;
+let saveTimer = null;
+const SAVE_DEBOUNCE_MS = 500;
 
 function ensureConfigDir() {
   if (!fs.existsSync(CONFIG_DIR)) {
@@ -57,6 +60,29 @@ function saveInstantCache() {
   }
 }
 
+function scheduleSave() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    flushInstantCache();
+  }, SAVE_DEBOUNCE_MS);
+}
+
+async function flushInstantCache() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  try {
+    ensureConfigDir();
+    const tmpFile = INSTANT_CACHE_FILE + '.tmp';
+    await fsp.writeFile(tmpFile, JSON.stringify(instantCache, null, 2), 'utf-8');
+    await fsp.rename(tmpFile, INSTANT_CACHE_FILE);
+  } catch (error) {
+    console.warn(`[INSTANT CACHE] Failed to save cache: ${error.message}`);
+  }
+}
+
 function getInstantCache() {
   if (!instantCache) {
     loadInstantCache();
@@ -83,7 +109,7 @@ function getInstantCacheEntry(type, id, requestedEpisode = null) {
   if (entry.cachedAt && INSTANT_CACHE_TTL_MS > 0) {
     if (Date.now() - entry.cachedAt > INSTANT_CACHE_TTL_MS) {
       delete cache[key];
-      saveInstantCache();
+      scheduleSave();
       return null;
     }
   }
@@ -100,7 +126,7 @@ function setInstantCacheEntry(type, id, requestedEpisode, entryData) {
     cachedAt: Date.now(),
   };
 
-  saveInstantCache();
+  scheduleSave();
   console.log(`[INSTANT CACHE] Saved entry for ${key}`);
 }
 
@@ -110,7 +136,7 @@ function clearInstantCacheEntry(type, id, requestedEpisode = null) {
 
   if (cache[key]) {
     delete cache[key];
-    saveInstantCache();
+    scheduleSave();
   }
 }
 
@@ -147,6 +173,7 @@ function getInstantCacheStats() {
 
 module.exports = {
   loadInstantCache,
+  flushInstantCache,
   getInstantCacheEntry,
   setInstantCacheEntry,
   clearInstantCacheEntry,

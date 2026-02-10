@@ -1,6 +1,8 @@
 // Verified NZB payload cache module
 const verifiedNzbCacheByUrl = new Map();
 let verifiedNzbCacheBytes = 0;
+const CLEANUP_EVERY_N_OPS = 50;
+let opsUntilCleanup = CLEANUP_EVERY_N_OPS;
 
 // Parse cache configuration from environment
 const VERIFIED_NZB_CACHE_TTL_MS = (() => {
@@ -38,9 +40,16 @@ function cleanupVerifiedNzbCache(now = Date.now()) {
   }
 }
 
+function maybeCleanup() {
+  if (--opsUntilCleanup <= 0) {
+    opsUntilCleanup = CLEANUP_EVERY_N_OPS;
+    cleanupVerifiedNzbCache();
+  }
+}
+
 function getVerifiedNzbCacheEntry(downloadUrl) {
   if (!downloadUrl || VERIFIED_NZB_CACHE_MAX_BYTES <= 0) return null;
-  cleanupVerifiedNzbCache();
+  maybeCleanup();
   const entry = verifiedNzbCacheByUrl.get(downloadUrl);
   if (!entry) return null;
   if (entry.expiresAt && entry.expiresAt <= Date.now()) {
@@ -81,7 +90,7 @@ function cacheVerifiedNzbPayload(downloadUrl, nzbPayload, metadata = {}) {
   });
   
   verifiedNzbCacheBytes += size;
-  cleanupVerifiedNzbCache();
+  maybeCleanup();
 }
 
 function clearVerifiedNzbCache(reason = 'manual') {

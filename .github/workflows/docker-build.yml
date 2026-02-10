@@ -2,7 +2,7 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: [main, master, upstream-sync-*]
+    branches: [main, master, upstream-sync-*, perf-*]
   workflow_dispatch:
 
 env:

@@ -38,16 +38,24 @@ function cleanupStreamCache(now = Date.now()) {
     }
   }
   
-  // Enforce size and count limits (FIFO)
+  // Enforce size and count limits (LRU)
   while (
     (STREAM_CACHE_MAX_BYTES > 0 && streamCacheBytes > STREAM_CACHE_MAX_BYTES)
     || (STREAM_CACHE_MAX_ENTRIES > 0 && streamResponseCache.size > STREAM_CACHE_MAX_ENTRIES)
   ) {
-    const oldestKey = streamResponseCache.keys().next().value;
-    if (!oldestKey) break;
-    const oldest = streamResponseCache.get(oldestKey);
-    streamResponseCache.delete(oldestKey);
-    if (oldest) streamCacheBytes -= oldest.size;
+    let lruKey = null;
+    let lruTime = Infinity;
+    for (const [key, entry] of streamResponseCache.entries()) {
+      const t = entry.lastAccess || 0;
+      if (t < lruTime) {
+        lruTime = t;
+        lruKey = key;
+      }
+    }
+    if (!lruKey) break;
+    const evicted = streamResponseCache.get(lruKey);
+    streamResponseCache.delete(lruKey);
+    if (evicted) streamCacheBytes -= evicted.size;
   }
 }
 
@@ -69,6 +77,7 @@ function getStreamCacheEntry(cacheKey) {
     streamCacheBytes -= entry.size;
     return null;
   }
+  entry.lastAccess = Date.now();
   return entry;
 }
 
@@ -82,7 +91,7 @@ function setStreamCacheEntry(cacheKey, payload, meta = null) {
     streamCacheBytes -= existing.size;
     streamResponseCache.delete(cacheKey);
   }
-  streamResponseCache.set(cacheKey, { payload, meta, expiresAt, size });
+  streamResponseCache.set(cacheKey, { payload, meta, expiresAt, size, lastAccess: Date.now() });
   streamCacheBytes += size;
   cleanupStreamCache();
 }
