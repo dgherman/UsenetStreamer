@@ -2977,8 +2977,6 @@ async function streamHandler(req, res) {
         if (result.easynewsPayload) baseParams.set('easynewsPayload', result.easynewsPayload);
         if (result._sourceType) baseParams.set('sourceType', result._sourceType);
 
-        const cacheKey = nzbdavService.buildNzbdavCacheKey(result.downloadUrl, categoryForType, requestedEpisode);
-        // Cache entries are managed internally by the cache module
         const normalizedTitle = precomputedTitles.get(result.downloadUrl) || normalizeReleaseTitle(result.title);
         let historySlot = normalizedTitle ? historyByTitle.get(normalizedTitle) : null;
         // Check if this exact match was already claimed by another result
@@ -3103,6 +3101,8 @@ async function streamHandler(req, res) {
         }
 
       const archiveFindings = triageInfo?.archiveFindings || [];
+        const blockers = triageInfo?.blockers || [];
+        const warnings = triageInfo?.warnings || [];
         const archiveStatuses = archiveFindings.map((finding) => String(finding?.status || '').toLowerCase());
         const archiveFailureTokens = new Set([
           'rar-compressed',
@@ -3116,7 +3116,7 @@ async function streamHandler(req, res) {
           'rar-header-not-found',
         ]);
         const passedArchiveCheck = archiveStatuses.some((status) => status === 'rar-stored' || status === 'sevenzip-stored');
-        const failedArchiveCheck = (triageInfo?.blockers || []).some((blocker) => archiveFailureTokens.has(blocker))
+        const failedArchiveCheck = blockers.some((blocker) => archiveFailureTokens.has(blocker))
           || archiveStatuses.some((status) => archiveFailureTokens.has(status));
         let archiveCheckStatus = 'not-run';
         if (triageInfo) {
@@ -3125,7 +3125,7 @@ async function streamHandler(req, res) {
           else if (archiveFindings.length > 0) archiveCheckStatus = 'inconclusive';
         }
 
-        const missingArticlesFailure = (triageInfo?.blockers || []).includes('missing-articles')
+        const missingArticlesFailure = blockers.includes('missing-articles')
           || archiveStatuses.includes('segment-missing');
         const missingArticlesSuccess = archiveStatuses.includes('segment-ok')
           || archiveStatuses.includes('sevenzip-untested');
@@ -3224,9 +3224,9 @@ async function streamHandler(req, res) {
             status: triageStatus,
             triageApplied,
             triagePriority,
-            blockers: triageInfo?.blockers || [],
-            warnings: triageInfo?.warnings || [],
-            archiveFindings: triageInfo?.archiveFindings || [],
+            blockers,
+            warnings,
+            archiveFindings,
             archiveCheckStatus,
             missingArticlesStatus,
             timedOut: Boolean(triageOutcome?.timedOut)
@@ -3284,8 +3284,8 @@ async function streamHandler(req, res) {
             if (triageInfo) {
               stream.meta.healthCheck = {
                 status: triageStatus,
-                blockers: triageInfo.blockers || [],
-                warnings: triageInfo.warnings || [],
+                blockers,
+                warnings,
                 fileCount: triageInfo.fileCount,
                 archiveCheck: archiveCheckStatus,
                 missingArticlesCheck: missingArticlesStatus,
