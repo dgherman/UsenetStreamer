@@ -38,6 +38,7 @@ const { normalizeReleaseTitle, parseRequestedEpisode, isVideoFileName, fileMatch
 const { sleep, annotateNzbResult, applyMaxSizeFilter, prepareSortedResults, getPreferredLanguageMatch, getPreferredLanguageMatches, triageStatusRank, buildTriageTitleMap, prioritizeTriageCandidates, triageDecisionsMatchStatuses, sanitizeDecisionForCache, serializeFinalNzbResults, restoreFinalNzbResults, safeStat } = require('./src/utils/helpers');
 const indexerService = require('./src/services/indexer');
 const nzbdavService = require('./src/services/nzbdav');
+const nzbdavWs = require('./src/services/nzbdavWebSocket');
 const specialMetadata = require('./src/services/specialMetadata');
 const tmdbService = require('./src/services/tmdb');
 const stats = require('./src/stats');
@@ -3861,6 +3862,7 @@ async function restartHttpServer() {
   startHttpServer();
 }
 
+nzbdavWs.init();
 startHttpServer();
 setInterval(prunePrefetchedNzbdavJobs, 5 * 60 * 1000);
 

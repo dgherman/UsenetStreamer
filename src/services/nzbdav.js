@@ -8,6 +8,7 @@ const { pipeline } = require('stream');
 const cache = require('../cache');
 const { normalizeReleaseTitle, normalizeNzbdavPath, isVideoFileName, fileMatchesEpisode, inferMimeType } = require('../utils/parsers');
 const { sleep, safeStat } = require('../utils/helpers');
+const nzbdavWs = require('./nzbdavWebSocket');
 
 const pipelineAsync = promisify(pipeline);
 
@@ -233,11 +234,13 @@ async function addNzbToNzbdav({ downloadUrl, cachedEntry = null, category, jobLa
   return { nzoId };
 }
 
-async function waitForNzbdavHistorySlot(nzoId, category) {
+async function pollForNzbdavHistorySlot(nzoId, category, abortSignal) {
   ensureNzbdavConfigured();
   const deadline = Date.now() + NZBDAV_POLL_TIMEOUT_MS;
 
   while (Date.now() < deadline) {
+    if (abortSignal?.aborted) return null;
+
     const params = buildNzbdavApiParams('history', {
       start: '0',
       limit: '50',
@@ -289,6 +292,42 @@ async function waitForNzbdavHistorySlot(nzoId, category) {
   }
 
   throw new Error('[NZBDAV] Timeout while waiting for NZB to become streamable');
+}
+
+async function waitForNzbdavHistorySlot(nzoId, category) {
+  const useWs = nzbdavWs.isConfigured() && nzbdavWs.isConnected();
+
+  if (!useWs) {
+    return pollForNzbdavHistorySlot(nzoId, category);
+  }
+
+  // Race WebSocket event against polling
+  const abortController = new AbortController();
+  const wsPromise = nzbdavWs.waitForHistoryEvent(nzoId, NZBDAV_POLL_TIMEOUT_MS);
+  const pollPromise = pollForNzbdavHistorySlot(nzoId, category, abortController.signal);
+
+  try {
+    const result = await Promise.race([
+      wsPromise.then((slot) => ({ source: 'websocket', slot })),
+      pollPromise.then((slot) => ({ source: 'polling', slot })),
+    ]);
+
+    // Clean up the loser
+    if (result.source === 'websocket') {
+      abortController.abort();
+      console.log(`[NZBDAV] History slot ready via WebSocket for ${nzoId}`);
+    } else {
+      nzbdavWs.cancelWaiter(nzoId);
+      console.log(`[NZBDAV] History slot ready via polling for ${nzoId}`);
+    }
+
+    return result.slot;
+  } catch (err) {
+    // Clean up both on error
+    abortController.abort();
+    nzbdavWs.cancelWaiter(nzoId);
+    throw err;
+  }
 }
 
 async function fetchCompletedNzbdavHistory(categories = []) {
