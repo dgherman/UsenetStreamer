@@ -24,6 +24,7 @@ let NZBDAV_CATEGORY_SERIES = process.env.NZBDAV_CATEGORY_SERIES || 'Tv';
 let NZBDAV_CATEGORY_DEFAULT = process.env.NZBDAV_CATEGORY_DEFAULT || 'Movies';
 let NZBDAV_CATEGORY_OVERRIDE = (process.env.NZBDAV_CATEGORY || '').trim();
 let NZBDAV_POLL_INTERVAL_MS = 2000;
+const NZBDAV_POLL_INTERVAL_WS_MS = 10000;
 let NZBDAV_POLL_TIMEOUT_MS = (() => {
   const raw = Number(process.env.NZBDAV_POLL_TIMEOUT_SECONDS);
   // Default 80 seconds, allow up to 10 minutes (600 seconds)
@@ -288,7 +289,8 @@ async function pollForNzbdavHistorySlot(nzoId, category, abortSignal) {
       }
     }
 
-    await sleep(NZBDAV_POLL_INTERVAL_MS);
+    const interval = nzbdavWs.isConnected() ? NZBDAV_POLL_INTERVAL_WS_MS : NZBDAV_POLL_INTERVAL_MS;
+    await sleep(interval);
   }
 
   throw new Error('[NZBDAV] Timeout while waiting for NZB to become streamable');
