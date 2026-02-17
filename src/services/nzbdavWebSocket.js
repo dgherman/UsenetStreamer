@@ -15,9 +15,13 @@ const MAX_RECONNECT_DELAY = 30000;
 const waiters = new Map();
 
 function getWsUrl() {
-  const httpUrl = (process.env.NZBDAV_URL || '').trim();
-  if (!httpUrl) return null;
-  return httpUrl.replace(/^http/i, 'ws').replace(/\/+$/, '') + '/ws';
+  // Explicit override takes priority
+  const explicit = (process.env.NZBDAV_WS_URL || '').trim();
+  if (explicit) return explicit.replace(/\/+$/, '') + '/ws';
+  // Fall back to the WebDAV URL (same ASP.NET backend that hosts /ws)
+  const webdavUrl = (process.env.NZBDAV_WEBDAV_URL || '').trim();
+  if (!webdavUrl) return null;
+  return webdavUrl.replace(/^http/i, 'ws').replace(/\/+$/, '') + '/ws';
 }
 
 function isConnected() {
@@ -81,7 +85,6 @@ function connect() {
 
   ws.on('open', () => {
     connected = true;
-    reconnectDelay = 1000;
     console.log(`${LOG_PREFIX} Connected`);
     // Authenticate by sending the API key as the first message
     ws.send(NZBDAV_WS_API_KEY);
@@ -95,6 +98,7 @@ function connect() {
     // therefore proves authentication succeeded.
     if (!authenticated) {
       authenticated = true;
+      reconnectDelay = 1000;
       console.log(`${LOG_PREFIX} Authenticated (received first state message)`);
     }
 
