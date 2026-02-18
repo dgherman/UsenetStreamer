@@ -743,7 +743,14 @@ function buildNntpServersArray() {
 }
 
 let INDEXER_SORT_MODE = normalizeSortMode(process.env.NZB_SORT_MODE, 'quality_then_size');
+let INDEXER_SORT_ORDER = parseCommaList(process.env.NZB_SORT_ORDER);
 let INDEXER_PREFERRED_LANGUAGES = resolvePreferredLanguages(process.env.NZB_PREFERRED_LANGUAGE, []);
+let INDEXER_PREFERRED_QUALITIES = parseCommaList(process.env.NZB_PREFERRED_QUALITIES);
+let INDEXER_PREFERRED_ENCODES = parseCommaList(process.env.NZB_PREFERRED_ENCODES);
+let INDEXER_PREFERRED_RELEASE_GROUPS = parseCommaList(process.env.NZB_PREFERRED_RELEASE_GROUPS);
+let INDEXER_PREFERRED_VISUAL_TAGS = parseCommaList(process.env.NZB_PREFERRED_VISUAL_TAGS);
+let INDEXER_PREFERRED_AUDIO_TAGS = parseCommaList(process.env.NZB_PREFERRED_AUDIO_TAGS);
+let INDEXER_PREFERRED_KEYWORDS = parseCommaList(process.env.NZB_PREFERRED_KEYWORDS);
 let INDEXER_DEDUP_ENABLED = toBoolean(process.env.NZB_DEDUP_ENABLED, true);
 let INDEXER_HIDE_BLOCKED_RESULTS = toBoolean(process.env.NZB_HIDE_BLOCKED_RESULTS, false);
 let INDEXER_MAX_RESULT_SIZE_BYTES = toSizeBytesFromGb(
@@ -902,7 +909,14 @@ function rebuildRuntimeConfig({ log = true } = {}) {
   });
 
   INDEXER_SORT_MODE = normalizeSortMode(process.env.NZB_SORT_MODE, 'quality_then_size');
+  INDEXER_SORT_ORDER = parseCommaList(process.env.NZB_SORT_ORDER);
   INDEXER_PREFERRED_LANGUAGES = resolvePreferredLanguages(process.env.NZB_PREFERRED_LANGUAGE, []);
+  INDEXER_PREFERRED_QUALITIES = parseCommaList(process.env.NZB_PREFERRED_QUALITIES);
+  INDEXER_PREFERRED_ENCODES = parseCommaList(process.env.NZB_PREFERRED_ENCODES);
+  INDEXER_PREFERRED_RELEASE_GROUPS = parseCommaList(process.env.NZB_PREFERRED_RELEASE_GROUPS);
+  INDEXER_PREFERRED_VISUAL_TAGS = parseCommaList(process.env.NZB_PREFERRED_VISUAL_TAGS);
+  INDEXER_PREFERRED_AUDIO_TAGS = parseCommaList(process.env.NZB_PREFERRED_AUDIO_TAGS);
+  INDEXER_PREFERRED_KEYWORDS = parseCommaList(process.env.NZB_PREFERRED_KEYWORDS);
   INDEXER_DEDUP_ENABLED = toBoolean(process.env.NZB_DEDUP_ENABLED, true);
   INDEXER_HIDE_BLOCKED_RESULTS = toBoolean(process.env.NZB_HIDE_BLOCKED_RESULTS, false);
   INDEXER_MAX_RESULT_SIZE_BYTES = toSizeBytesFromGb(
@@ -986,7 +1000,14 @@ const ADMIN_CONFIG_KEYS = [
   'INDEXER_MANAGER_INDEXERS',
   'INDEXER_MANAGER_CACHE_MINUTES',
   'NZB_SORT_MODE',
+  'NZB_SORT_ORDER',
   'NZB_PREFERRED_LANGUAGE',
+  'NZB_PREFERRED_QUALITIES',
+  'NZB_PREFERRED_ENCODES',
+  'NZB_PREFERRED_RELEASE_GROUPS',
+  'NZB_PREFERRED_VISUAL_TAGS',
+  'NZB_PREFERRED_AUDIO_TAGS',
+  'NZB_PREFERRED_KEYWORDS',
   'NZB_MAX_RESULT_SIZE_GB',
   'NZB_DEDUP_ENABLED',
   'NZB_HIDE_BLOCKED_RESULTS',
@@ -2601,10 +2622,21 @@ async function streamHandler(req, res) {
     })();
     const resolvedPreferredLanguages = resolvePreferredLanguages(triageOverrides.preferredLanguages, INDEXER_PREFERRED_LANGUAGES);
     const activeSortMode = triageOverrides.sortMode || INDEXER_SORT_MODE;
+    // Only activate custom_priority sort when NZB_SORT_ORDER is explicitly configured;
+    // otherwise fall back to the existing NZB_SORT_MODE behaviour.
+    const resolvedSortOrder = INDEXER_SORT_ORDER.length > 0 ? INDEXER_SORT_ORDER : [];
+    const effectiveSortMode = resolvedSortOrder.length > 0 ? 'custom_priority' : activeSortMode;
 
     finalNzbResults = prepareSortedResults(finalNzbResults, {
-      sortMode: activeSortMode,
+      sortMode: effectiveSortMode,
+      sortOrder: resolvedSortOrder,
       preferredLanguages: resolvedPreferredLanguages,
+      preferredQualities: INDEXER_PREFERRED_QUALITIES,
+      preferredEncodes: INDEXER_PREFERRED_ENCODES,
+      preferredReleaseGroups: INDEXER_PREFERRED_RELEASE_GROUPS,
+      preferredVisualTags: INDEXER_PREFERRED_VISUAL_TAGS,
+      preferredAudioTags: INDEXER_PREFERRED_AUDIO_TAGS,
+      preferredKeywords: INDEXER_PREFERRED_KEYWORDS,
       maxSizeBytes: effectiveMaxSizeBytes,
       allowedResolutions: ALLOWED_RESOLUTIONS,
       resolutionLimitPerQuality: RESOLUTION_LIMIT_PER_QUALITY,
@@ -3081,8 +3113,9 @@ async function streamHandler(req, res) {
           || releaseInfo.resolution
           || (qualityMatch ? normalizeResolutionToken(qualityMatch[0]) : null);
         const resolutionBadge = formatResolutionBadge(detectedResolutionToken);
-        const qualityLabel = releaseInfo.qualityLabel && releaseInfo.qualityLabel !== detectedResolutionToken
-          ? releaseInfo.qualityLabel
+        const rawQualityLabel = result.qualityLabel || releaseInfo.qualityLabel || null;
+        const qualityLabel = rawQualityLabel && String(rawQualityLabel).toLowerCase() !== String(detectedResolutionToken || '').toLowerCase()
+          ? rawQualityLabel
           : null;
         const featureBadges = extractQualityFeatureBadges(result.title || '');
         const qualityParts = [];

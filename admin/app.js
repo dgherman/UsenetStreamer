@@ -22,6 +22,15 @@
   const tmdbLanguageHiddenInput = configForm.querySelector('[data-tmdb-language-hidden]');
   const tmdbLanguageCheckboxes = Array.from(configForm.querySelectorAll('input[data-tmdb-language-option]'));
   const tmdbLanguageSelector = configForm.querySelector('[data-tmdb-language-selector]');
+  const sortOrderHiddenInput = configForm.querySelector('[data-sort-order-hidden]');
+  const sortOrderOptions = Array.from(configForm.querySelectorAll('input[data-sort-order-option]'));
+  const sortOrderCurrentHint = configForm.querySelector('[data-sort-order-current]');
+  const tmdbEnabledToggle = configForm.querySelector('input[name="TMDB_ENABLED"]');
+  const tmdbApiInput = configForm.querySelector('input[name="TMDB_API_KEY"]');
+  const tmdbTestButton = configForm.querySelector('button[data-test="tmdb"]');
+  const tvdbEnabledToggle = configForm.querySelector('input[name="TVDB_ENABLED"]');
+  const tvdbApiInput = configForm.querySelector('input[name="TVDB_API_KEY"]');
+  const tvdbTestButton = configForm.querySelector('button[data-test="tvdb"]');
   const versionBadge = document.getElementById('addonVersionBadge');
   const streamingModeSelect = document.getElementById('streamingModeSelect');
   const nativeModeNotice = document.getElementById('nativeModeNotice');
@@ -35,9 +44,23 @@
   let runtimeEnvPath = null;
   let allowNewznabTestSearch = false;
   let newznabPresets = [];
+  let activeSortOrder = [];
+  let loadedSortMode = 'quality_then_size';
 
   const MAX_NEWZNAB_INDEXERS = 20;
-  const NEWZNAB_SUFFIXES = ['ENDPOINT', 'API_KEY', 'API_PATH', 'NAME', 'INDEXER_ENABLED', 'PAID'];
+  const NEWZNAB_SUFFIXES = ['ENDPOINT', 'API_KEY', 'API_PATH', 'NAME', 'INDEXER_ENABLED', 'PAID', 'PAID_LIMIT', 'ZYCLOPS'];
+  const SUPPORTED_SORT_KEYS = ['language', 'release_group', 'size', 'resolution', 'quality', 'encode', 'visual_tag', 'audio_tag', 'keyword'];
+  const SORT_LABELS = {
+    language: 'Language',
+    release_group: 'Release Group',
+    size: 'Size',
+    resolution: 'Resolution',
+    quality: 'Quality',
+    encode: 'Encode',
+    visual_tag: 'Visual Tag',
+    audio_tag: 'Audio Tag',
+    keyword: 'Keyword',
+  };
 
   const managerSelect = configForm.querySelector('select[name="INDEXER_MANAGER"]');
   const newznabList = document.getElementById('newznab-indexers-list');
@@ -245,6 +268,52 @@
       checkbox.checked = selectedSet.has(checkbox.value);
     });
     syncLanguageHiddenInput();
+  }
+
+  function parseSortOrder(raw) {
+    const seen = new Set();
+    return (raw || '')
+      .split(',')
+      .map((value) => value.trim().toLowerCase())
+      .filter((value) => {
+        if (!value || !SUPPORTED_SORT_KEYS.includes(value) || seen.has(value)) return false;
+        seen.add(value);
+        return true;
+      });
+  }
+
+  function getDefaultSortOrder() {
+    return loadedSortMode === 'language_quality_size'
+      ? ['language', 'resolution', 'size']
+      : ['resolution', 'size'];
+  }
+
+  function syncSortOrderUI() {
+    if (sortOrderHiddenInput) {
+      sortOrderHiddenInput.value = activeSortOrder.join(',');
+    }
+    const displayOrder = activeSortOrder.length > 0 ? activeSortOrder : getDefaultSortOrder();
+    sortOrderOptions.forEach((option) => {
+      const key = (option.value || '').trim().toLowerCase();
+      const index = displayOrder.indexOf(key);
+      option.checked = index !== -1;
+      const label = option.closest('label');
+      const badge = label ? label.querySelector('[data-sort-order-index]') : null;
+      if (badge) {
+        badge.textContent = index === -1 ? '' : String(index + 1);
+      }
+    });
+  }
+
+  function setSortOrder(order) {
+    activeSortOrder = parseSortOrder(Array.isArray(order) ? order.join(',') : String(order || ''));
+    syncSortOrderUI();
+    syncSortingControls();
+  }
+
+  function applySortOrderFromHidden() {
+    if (!sortOrderHiddenInput) return;
+    setSortOrder(sortOrderHiddenInput.value || '');
   }
 
   function hasManagerConfigured() {
@@ -726,15 +795,17 @@
     saveStatus.textContent = '';
 
     try {
-  const data = await apiRequest('/admin/api/config');
-  const values = data.values || {};
-  setAvailableNewznabPresets(data?.newznabPresets || []);
+      const data = await apiRequest('/admin/api/config');
+      const values = data.values || {};
+      loadedSortMode = (values.NZB_SORT_MODE || 'quality_then_size').toString().trim().toLowerCase();
+      setAvailableNewznabPresets(data?.newznabPresets || []);
       updateVersionBadge(data?.addonVersion);
       allowNewznabTestSearch = Boolean(data?.debugNewznabSearch);
       setupNewznabRowsFromValues(values);
       populateForm(values);
       applyLanguageSelectionsFromHidden();
       applyQualitySelectionsFromHidden();
+      applySortOrderFromHidden();
       applyTmdbLanguageSelectionsFromHidden();
       refreshNewznabFieldNames();
       syncHealthControls();
@@ -890,16 +961,12 @@
   }
 
   function syncSortingControls() {
-    if (!sortingModeSelect || !languageHiddenInput) return;
-    const requiresLanguage = sortingModeSelect.value === 'language_quality_size';
-    if (requiresLanguage) {
-      languageHiddenInput.setAttribute('required', 'required');
-    } else {
-      languageHiddenInput.removeAttribute('required');
-    }
-    if (languageSelector) {
-      languageSelector.classList.toggle('language-required', requiresLanguage);
-    }
+    if (!sortOrderCurrentHint) return;
+    const effective = activeSortOrder.length > 0 ? activeSortOrder : getDefaultSortOrder();
+    const label = effective.map((key) => SORT_LABELS[key] || key).join(' → ');
+    sortOrderCurrentHint.textContent = activeSortOrder.length > 0
+      ? `Current sorting: ${label}`
+      : `Current sorting (default): ${label}`;
   }
 
   function syncManagerControls() {
@@ -1359,7 +1426,6 @@
   configForm.addEventListener('submit', saveConfiguration);
 
   const testButtons = configForm.querySelectorAll('button[data-test]');
-  const sortingModeSelect = configForm.querySelector('select[name="NZB_SORT_MODE"]');
   testButtons.forEach((button) => {
     button.addEventListener('click', () => runConnectionTest(button));
   });
@@ -1385,9 +1451,6 @@
   if (triageConnectionsInput) {
     triageConnectionsInput.addEventListener('input', enforceConnectionLimit);
   }
-  if (sortingModeSelect) {
-    sortingModeSelect.addEventListener('change', syncSortingControls);
-  }
   languageCheckboxes.forEach((checkbox) => {
     checkbox.addEventListener('change', () => {
       syncLanguageHiddenInput();
@@ -1395,6 +1458,42 @@
       syncSaveGuard();
     });
   });
+
+  sortOrderOptions.forEach((option) => {
+    option.addEventListener('change', () => {
+      const key = (option.value || '').trim().toLowerCase();
+      const baseOrder = activeSortOrder.length > 0 ? activeSortOrder : getDefaultSortOrder();
+      const next = baseOrder.filter((entry) => entry !== key);
+      if (option.checked) {
+        next.push(key);
+      }
+      setSortOrder(next);
+      syncSaveGuard();
+    });
+  });
+
+  const languageSearch = configForm.querySelector('input[data-search-target="nzb"]');
+  const tmdbLanguageSearch = configForm.querySelector('input[data-search-target="tmdb"]');
+
+  function setupLanguageSearch(searchInput, checkboxList) {
+    if (!searchInput || !checkboxList) return;
+    searchInput.addEventListener('input', () => {
+      const query = (searchInput.value || '').trim().toLowerCase();
+      checkboxList.forEach((input) => {
+        const label = input.closest('label');
+        if (!label) return;
+        const text = (label.textContent || '').trim().toLowerCase();
+        if (!query) {
+          label.style.display = '';
+        } else {
+          label.style.display = text.includes(query) ? '' : 'none';
+        }
+      });
+    });
+  }
+
+  setupLanguageSearch(languageSearch, languageCheckboxes);
+  setupLanguageSearch(tmdbLanguageSearch, tmdbLanguageCheckboxes);
 
   const managerPaidInputs = configForm.querySelectorAll('[name="NZB_TRIAGE_PRIORITY_INDEXERS"], [name="NZB_TRIAGE_HEALTH_INDEXERS"]');
   managerPaidInputs.forEach((input) => {
