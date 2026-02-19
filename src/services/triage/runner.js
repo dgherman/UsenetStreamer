@@ -116,28 +116,38 @@ function summarizeDecision(decision) {
   const warnings = Array.isArray(decision?.warnings) ? decision.warnings : [];
   const archiveFindings = Array.isArray(decision?.archiveFindings) ? decision.archiveFindings : [];
 
+  // Check if any 7z-related finding exists (7z is never verified, best case is unverified_7z)
+  const hasSevenZipFinding = archiveFindings.some((finding) => {
+    const label = String(finding?.status || '').toLowerCase();
+    return label.startsWith('sevenzip');
+  }) || warnings.some((warning) => String(warning || '').toLowerCase().startsWith('sevenzip'));
+
   let status = 'blocked';
   if (decision?.decision === 'accept' && blockers.length === 0) {
-    const positiveFinding = archiveFindings.some((finding) => {
-      const label = String(finding?.status || '').toLowerCase();
-      return label === 'rar-stored' || label === 'sevenzip-stored' || label === 'segment-ok';
-    });
-    if (positiveFinding) {
-      status = 'verified';
+    if (hasSevenZipFinding) {
+      // 7z: best case is unverified_7z, never verified
+      status = 'unverified_7z';
     } else {
-      status = 'unverified';
+      const positiveFinding = archiveFindings.some((finding) => {
+        const label = String(finding?.status || '').toLowerCase();
+        return label === 'rar-stored' || label === 'segment-ok';
+      });
+      if (positiveFinding) {
+        status = 'verified';
+      } else {
+        status = 'unverified';
+      }
     }
   }
 
-  // Flag unverified outcomes that are 7z-only so downstream caching can treat them as complete
-  if (status === 'unverified') {
-    const sevenZipFlag = archiveFindings.some((finding) => {
-      const label = String(finding?.status || '').toLowerCase();
-      return label.startsWith('sevenzip');
-    }) || warnings.some((warning) => String(warning || '').toLowerCase().startsWith('sevenzip'));
-    if (sevenZipFlag) {
-      status = 'unverified_7z';
-    }
+  // Downgrade verified to unverified_7z if any 7z finding is present
+  if (status === 'verified' && hasSevenZipFinding) {
+    status = 'unverified_7z';
+  }
+
+  // Flag other unverified outcomes that are 7z-only
+  if (status === 'unverified' && hasSevenZipFinding) {
+    status = 'unverified_7z';
   }
 
   return {

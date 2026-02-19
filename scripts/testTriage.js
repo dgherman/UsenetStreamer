@@ -161,6 +161,98 @@ function formatDecisionRow(filename, decision) {
   ].join(' | ');
 }
 
+function deriveTriageStatus(decision) {
+  const blockers = Array.isArray(decision?.blockers) ? decision.blockers : [];
+  const warnings = Array.isArray(decision?.warnings) ? decision.warnings : [];
+  const archiveFindings = Array.isArray(decision?.archiveFindings) ? decision.archiveFindings : [];
+
+  const hasSevenZipFinding = archiveFindings.some((finding) => {
+    const label = String(finding?.status || '').toLowerCase();
+    return label.startsWith('sevenzip');
+  }) || warnings.some((warning) => String(warning || '').toLowerCase().startsWith('sevenzip'));
+
+  let status = 'blocked';
+  if (decision?.decision === 'accept' && blockers.length === 0) {
+    if (hasSevenZipFinding) {
+      status = 'unverified_7z';
+    } else {
+      const positiveFinding = archiveFindings.some((finding) => {
+        const label = String(finding?.status || '').toLowerCase();
+        return label === 'rar-stored' || label === 'segment-ok';
+      });
+      status = positiveFinding ? 'verified' : 'unverified';
+    }
+  }
+
+  if (status === 'verified' && hasSevenZipFinding) {
+    status = 'unverified_7z';
+  }
+
+  if (status === 'unverified' && hasSevenZipFinding) {
+    status = 'unverified_7z';
+  }
+
+  return status;
+}
+
+function getTriagePriority(status) {
+  if (status === 'verified') return 0;
+  if (status === 'blocked' || status === 'fetch-error' || status === 'error') return 2;
+  return 1;
+}
+
+function collectArchiveSampleEntries(archiveFindings) {
+  const archiveSampleEntries = [];
+  (archiveFindings || []).forEach((finding) => {
+    const samples = finding?.details?.sampleEntries;
+    if (Array.isArray(samples)) {
+      samples.forEach((entry) => {
+        if (entry && !archiveSampleEntries.includes(entry)) {
+          archiveSampleEntries.push(entry);
+        }
+      });
+    } else if (finding?.details?.name && !archiveSampleEntries.includes(finding.details.name)) {
+      archiveSampleEntries.push(finding.details.name);
+    }
+  });
+  return archiveSampleEntries;
+}
+
+function deriveArchiveCheckStatus(decision, archiveFindings) {
+  const archiveStatuses = (archiveFindings || []).map((finding) => String(finding?.status || '').toLowerCase());
+  const archiveFailureTokens = new Set([
+    'rar-compressed',
+    'rar-encrypted',
+    'rar-solid',
+    'sevenzip-unsupported',
+    'archive-not-found',
+    'archive-no-segments',
+    'rar-insufficient-data',
+    'rar-header-not-found',
+  ]);
+  const passedArchiveCheck = archiveStatuses.some((status) => status === 'rar-stored' || status === 'sevenzip-signature-ok');
+  const failedArchiveCheck = (decision?.blockers || []).some((blocker) => archiveFailureTokens.has(blocker))
+    || archiveStatuses.some((status) => archiveFailureTokens.has(status));
+
+  if (failedArchiveCheck) return 'failed';
+  if (passedArchiveCheck) return 'passed';
+  if ((archiveFindings || []).length > 0) return 'inconclusive';
+  return 'not-run';
+}
+
+function deriveMissingArticlesStatus(decision, archiveFindings) {
+  const archiveStatuses = (archiveFindings || []).map((finding) => String(finding?.status || '').toLowerCase());
+  const missingArticlesFailure = (decision?.blockers || []).includes('missing-articles')
+    || archiveStatuses.includes('segment-missing');
+  const missingArticlesSuccess = archiveStatuses.includes('segment-ok')
+    || archiveStatuses.includes('sevenzip-untested');
+
+  if (missingArticlesFailure) return 'failed';
+  if (missingArticlesSuccess) return 'passed';
+  if ((archiveFindings || []).length > 0) return 'inconclusive';
+  return 'not-run';
+}
+
 function printMetrics(metrics) {
   if (!metrics) return;
   const avgStat = metrics.statCalls > 0 ? Math.round(metrics.statDurationMs / metrics.statCalls) : 0;
