@@ -1480,6 +1480,15 @@ async function streamHandler(req, res) {
     if (streamCacheKey) {
       cachedStreamEntry = cache.getStreamCacheEntry(streamCacheKey);
       if (cachedStreamEntry) {
+        const cachedStreams = Array.isArray(cachedStreamEntry.payload?.streams)
+          ? cachedStreamEntry.payload.streams
+          : [];
+        if (cachedStreams.length === 0) {
+          console.log('[CACHE] Ignoring cached empty stream payload', { type, id });
+          cachedStreamEntry = null;
+        }
+      }
+      if (cachedStreamEntry) {
         const cacheMeta = cachedStreamEntry.meta;
         if (cacheMeta?.version === 1 && Array.isArray(cacheMeta.finalNzbResults)) {
           const snapshot = Array.isArray(cacheMeta.triageDecisionsSnapshot) ? cacheMeta.triageDecisionsSnapshot : [];
@@ -2551,7 +2560,7 @@ async function streamHandler(req, res) {
       const decision = triageDecisions.get(candidate.downloadUrl);
       return decision && decision.status ? String(decision.status).toLowerCase() : null;
     };
-    const pendingStatuses = new Set(['unverified', 'pending']);
+    const pendingStatuses = new Set(['unverified', 'pending', 'fetch-error']);
     const hasPendingRetries = triagePool.some((candidate) => pendingStatuses.has(getDecisionStatus(candidate)));
     const hasVerifiedResult = triagePool.some((candidate) => getDecisionStatus(candidate) === 'verified');
     let triageEligibleResults = [];

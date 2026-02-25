@@ -1,6 +1,9 @@
 const { parseStringPromise } = require('xml2js');
 const fs = require('fs/promises');
 const path = require('path');
+const crypto = require('crypto');
+let lzma;
+try { lzma = require('lzma-native'); } catch (e) { lzma = null; }
 const { isVideoFileName } = require('../../utils/parsers');
 const NNTPModule = require('nntp/lib/nntp');
 const NNTP = typeof NNTPModule === 'function' ? NNTPModule : NNTPModule?.NNTP;
@@ -15,6 +18,11 @@ const ISO_FILE_EXTENSIONS = ['.iso'];
 const ARCHIVE_ONLY_MIN_PARTS = 10;
 const RAR4_SIGNATURE = Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00]);
 const RAR5_SIGNATURE = Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00]);
+const SEVENZIP_SIGNATURE = Buffer.from([0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]);
+const ZIP_LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
+const ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50;
+const ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50;
+const PARTNN_RAR_RE = /^(.+)\.part(\d+)\.rar$/i;
 const ARCHIVE_SAMPLE_ENTRY_LIMIT = 5;
 
 const TRIAGE_ACTIVITY_TTL_MS = 5 * 60 * 1000; // 5 mins window for keep-alives
@@ -310,6 +318,25 @@ async function analyzeSingleNzb(raw, ctx) {
   const checkedSegments = new Set();
   let primaryArchive = null;
 
+  // Early NZB-level check: detect multipart RAR sets with inconsistent segment counts
+  const inconsistentParts = detectInconsistentRarParts(files);
+  if (inconsistentParts) {
+    blockers.add('rar-inconsistent-parts');
+    archiveFindings.push({
+      source: 'nzb-metadata',
+      filename: inconsistentParts.sample,
+      subject: null,
+      status: 'rar-inconsistent-parts',
+      details: {
+        archiveName: inconsistentParts.archiveName,
+        totalParts: inconsistentParts.totalParts,
+        expectedSegments: inconsistentParts.expectedSegments,
+        mismatchCount: inconsistentParts.mismatchCount,
+        segmentCounts: inconsistentParts.segmentCounts,
+      },
+    });
+  }
+
   const hasPlayableVideo = files.some((file) => {
     const name = file.filename || guessFilenameFromSubject(file.subject) || '';
     return isPlayableVideoName(name);
@@ -361,8 +388,8 @@ async function analyzeSingleNzb(raw, ctx) {
       if (ctx.nntpError) warnings.add(`nntp-error:${ctx.nntpError.code ?? ctx.nntpError.message}`);
       else warnings.add('nntp-disabled');
     } else if (uniqueSegments.length > 0) {
-      const statSampleCount = Math.max(1, Math.floor(ctx.config?.statSampleCount ?? 1));
-      const sampledSegments = pickRandomElements(uniqueSegments, statSampleCount);
+      const fallbackSampleCount = Math.max(1, Math.floor(ctx.config?.archiveSampleCount ?? 1));
+      const sampledSegments = pickRandomElements(uniqueSegments, fallbackSampleCount);
       await Promise.all(sampledSegments.map(async ({ segmentId, file }) => {
         try {
           await statSegment(ctx.nntpPool, segmentId);
@@ -430,7 +457,8 @@ async function analyzeSingleNzb(raw, ctx) {
   } else {
     const archiveWithSegments = selectArchiveForInspection(archiveCandidates);
     if (archiveWithSegments) {
-      const nntpResult = await inspectArchiveViaNntp(archiveWithSegments, ctx);
+      const nzbPassword = extractPassword(parsed);
+      const nntpResult = await inspectArchiveViaNntp(archiveWithSegments, ctx, files, nzbPassword);
       archiveFindings.push({
         source: 'nntp',
         filename: archiveWithSegments.filename,
@@ -440,7 +468,7 @@ async function analyzeSingleNzb(raw, ctx) {
       });
       if (nntpResult.segmentId) {
         checkedSegments.add(nntpResult.segmentId);
-        if (nntpResult.status === 'rar-stored' || nntpResult.status === 'sevenzip-stored') {
+        if (nntpResult.status === 'rar-stored' || nntpResult.status === 'sevenzip-signature-ok') {
           archiveFindings.push({
             source: 'nntp-stat',
             filename: archiveWithSegments.filename,
@@ -459,7 +487,9 @@ async function analyzeSingleNzb(raw, ctx) {
     }
   }
 
-  if (ctx.nntpPool && storedArchiveFound && blockers.size === 0) {
+  // Run STAT sampling for any archive inspection (including 7z) to detect missing articles
+  const archiveInspected = Boolean(primaryArchive);
+  if (ctx.nntpPool && archiveInspected && blockers.size === 0) {
     const extraStatChecks = Math.max(0, Math.floor(ctx.config?.statSampleCount ?? 0));
     if (extraStatChecks > 0 && primaryArchive?.segments?.length) {
       const availablePrimarySegments = primaryArchive.segments
@@ -471,21 +501,34 @@ async function analyzeSingleNzb(raw, ctx) {
       await Promise.all(primarySamples.map((segment) => runStatCheck(primaryArchive, segment)));
     }
 
-    const archivesWithSegments = archiveCandidates.filter((archive) => archive.segments.length > 0 && archive !== primaryArchive);
-      const archiveSampleCount = Math.max(1, Math.floor(ctx.config?.archiveSampleCount ?? 1));
-        const sampleArchives = pickRandomElements(
-          archivesWithSegments.filter((archive) => {
-            const segmentId = archive.segments[0]?.id;
-            return segmentId && !checkedSegments.has(segmentId);
-          }),
-          archiveSampleCount,
-        );
+    const archiveSampleCount = Math.max(0, Math.floor(ctx.config?.archiveSampleCount ?? 0));
+    if (archiveSampleCount > 0) {
+      const primaryKey = canonicalArchiveKey(primaryArchive?.filename || primaryArchive?.subject || '');
+      const candidateArchives = archiveCandidates.filter((archive) => {
+        if (!archive?.segments?.length) return false;
+        const key = canonicalArchiveKey(archive.filename || archive.subject || '');
+        if (primaryKey && key === primaryKey) return false;
+        if (!archive.segments.some((segment) => segment?.id && !checkedSegments.has(segment.id))) return false;
+        return true;
+      });
 
-        await Promise.all(sampleArchives.map(async (archive) => {
-          const segment = archive.segments.find((entry) => entry?.id && !checkedSegments.has(entry.id));
-          if (!segment) return;
-          await runStatCheck(archive, segment);
-        }));
+      const uniqueCandidates = [];
+      const seenArchiveKeys = new Set();
+      candidateArchives.forEach((archive) => {
+        const key = canonicalArchiveKey(archive.filename || archive.subject || '');
+        if (!key || seenArchiveKeys.has(key)) return;
+        seenArchiveKeys.add(key);
+        uniqueCandidates.push(archive);
+      });
+
+      const sampleArchives = pickRandomElements(uniqueCandidates, archiveSampleCount);
+
+      await Promise.all(sampleArchives.map(async (archive) => {
+        const segment = archive.segments.find((entry) => entry?.id && !checkedSegments.has(entry.id));
+        if (!segment) return;
+        await runStatCheck(archive, segment);
+      }));
+    }
   }
   if (!storedArchiveFound && blockers.size === 0) warnings.add('rar-m0-unverified');
 
@@ -587,6 +630,37 @@ function isIsoFileName(name) {
   if (!name) return false;
   const lower = name.toLowerCase();
   return ISO_FILE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+function isDiscStructurePath(name) {
+  if (!name) return false;
+  const lower = name.toLowerCase().replace(/\\/g, '/');
+  if (/\bbdmv\//.test(lower)) return true;
+  if (/\bvideo_ts\//.test(lower)) return true;
+  if (lower.endsWith('.bdjo') || lower.endsWith('.clpi') || lower.endsWith('.mpls')) return true;
+  if (lower.endsWith('.bup') || lower.endsWith('.ifo') || lower.endsWith('.vob')) return true;
+  return false;
+}
+
+const NON_VIDEO_MEDIA_EXTENSIONS = new Set([
+  '.mp3', '.flac', '.wav', '.aac', '.ogg', '.wma', '.ape', '.opus', '.m4a', '.alac',
+  '.dsf', '.dff', '.wv',
+  '.pdf', '.epub', '.mobi', '.azw3', '.cbr', '.cbz',
+]);
+function isNonVideoMediaFile(name) {
+  if (!name) return false;
+  const lower = name.toLowerCase();
+  const dot = lower.lastIndexOf('.');
+  if (dot < 0) return false;
+  return NON_VIDEO_MEDIA_EXTENSIONS.has(lower.slice(dot));
+}
+
+function extractPassword(parsedNzb) {
+  const meta = parsedNzb?.nzb?.head?.meta;
+  if (!meta) return null;
+  const items = Array.isArray(meta) ? meta : [meta];
+  const match = items.find((entry) => entry?.$?.type === 'password');
+  return match?._ ?? null;
 }
 
 function isPlayableVideoName(name) {
@@ -703,12 +777,45 @@ function dedupeArchiveCandidates(archives) {
   return result;
 }
 
+function detectInconsistentRarParts(files) {
+  const groups = new Map();
+  for (const file of files) {
+    const name = file.filename || guessFilenameFromSubject(file.subject) || '';
+    const m = PARTNN_RAR_RE.exec(name);
+    if (!m) continue;
+    const archiveName = m[1].toLowerCase();
+    const partNum = parseInt(m[2], 10);
+    const segCount = Array.isArray(file.segments) ? file.segments.length : 0;
+    if (!groups.has(archiveName)) groups.set(archiveName, []);
+    groups.get(archiveName).push({ partNum, segCount, filename: name });
+  }
+
+  for (const [archiveName, parts] of groups) {
+    if (parts.length < 3) continue;
+    parts.sort((a, b) => a.partNum - b.partNum);
+    const allButLast = parts.slice(0, -1);
+    if (allButLast.length < 2) continue;
+    const expectedSize = allButLast[0].segCount;
+    if (expectedSize === 0) continue;
+    const mismatchCount = allButLast.filter((p) => p.segCount !== expectedSize).length;
+    if (mismatchCount > 0 && mismatchCount / allButLast.length > 0.2) {
+      const sizes = parts.map((p) => p.segCount);
+      return {
+        archiveName,
+        totalParts: parts.length,
+        expectedSegments: expectedSize,
+        mismatchCount,
+        segmentCounts: sizes,
+        sample: parts.find((p) => p.segCount !== expectedSize)?.filename || null,
+      };
+    }
+  }
+  return null;
+}
+
 function canonicalArchiveKey(name) {
   if (!name) return null;
-  let key = name.toLowerCase();
-  key = key.replace(/\.part\d+\.rar$/i, '.rar');
-  key = key.replace(/\.r\d{2}$/i, '.rar');
-  return key;
+  return name.toLowerCase();
 }
 
 function selectArchiveForInspection(archives) {
@@ -729,6 +836,9 @@ function buildArchiveScore(archive) {
   if (/\.rar$/i.test(filename)) score += 10;
   if (/\.r\d{2}$/i.test(filename)) score += 9;
   if (/\.part\d+\.rar$/i.test(filename)) score += 8;
+  if (/\.7z$/i.test(filename)) score += 10;
+  if (/\.7z\.001$/i.test(filename)) score += 10;
+  if (/\.7z\.\d{3}$/i.test(filename)) score += 9;
   if (/proof|sample|nfo/i.test(filename)) score -= 5;
   if (isVideoFileName(filename)) score += 4;
   return score;
@@ -784,7 +894,7 @@ async function analyzeArchiveFile(filePath) {
   }
 }
 
-async function inspectArchiveViaNntp(file, ctx) {
+async function inspectArchiveViaNntp(file, ctx, allFiles, nzbPassword) {
   const segments = file.segments ?? [];
   if (segments.length === 0) return { status: 'archive-no-segments' };
   const segmentId = segments[0]?.id;
@@ -792,40 +902,41 @@ async function inspectArchiveViaNntp(file, ctx) {
   const effectiveFilename = file.filename || guessFilenameFromSubject(file.subject) || '';
   const isSevenZip = isSevenZipFilename(effectiveFilename);
   return runWithClient(ctx.nntpPool, async (client) => {
-    let statStart = null;
-    if (currentMetrics) {
-      currentMetrics.statCalls += 1;
-      statStart = Date.now();
-    }
-    try {
-      await statSegmentWithClient(client, segmentId);
-      if (currentMetrics && statStart !== null) {
-        currentMetrics.statSuccesses += 1;
-        currentMetrics.statDurationMs += Date.now() - statStart;
-      }
-    } catch (err) {
-      if (currentMetrics && statStart !== null) {
-        currentMetrics.statDurationMs += Date.now() - statStart;
-        if (err.code === 'STAT_MISSING' || err.code === 430) currentMetrics.statMissing += 1;
-        else currentMetrics.statErrors += 1;
-      }
-      if (err.code === 'STAT_MISSING' || err.code === 430) return { status: 'stat-missing', details: { segmentId }, segmentId };
-      return { status: 'stat-error', details: { segmentId, message: err.message }, segmentId };
-    }
-
+    // For 7z archives, do a quick STAT pre-check before the heavier deep inspection.
+    // For RAR/ZIP, skip upfront STAT — the BODY fetch on the same segment will
+    // inherently verify existence, avoiding a redundant round-trip.
     if (isSevenZip) {
-      // console.log('[NZB TRIAGE] Skipping 7z archive inspection (STAT passed, body skipped)', {
-      //   filename: file.filename,
-      //   subject: file.subject,
-      //   segmentId,
-      // });
-      return {
-        status: 'sevenzip-untested',
-        details: { reason: '7z-skip-body', filename: effectiveFilename },
-        segmentId,
-      };
+      let statStart = null;
+      if (currentMetrics) {
+        currentMetrics.statCalls += 1;
+        statStart = Date.now();
+      }
+      try {
+        await statSegmentWithClient(client, segmentId);
+        if (currentMetrics && statStart !== null) {
+          currentMetrics.statSuccesses += 1;
+          currentMetrics.statDurationMs += Date.now() - statStart;
+        }
+      } catch (err) {
+        if (currentMetrics && statStart !== null) {
+          currentMetrics.statDurationMs += Date.now() - statStart;
+          if (err.code === 'STAT_MISSING' || err.code === 430) currentMetrics.statMissing += 1;
+          else currentMetrics.statErrors += 1;
+        }
+        if (err.code === 'STAT_MISSING' || err.code === 430) return { status: 'stat-missing', details: { segmentId }, segmentId };
+        return { status: 'stat-error', details: { segmentId, message: err.message }, segmentId };
+      }
+
+      try {
+        const deepResult = await inspectSevenZipDeep(file, ctx, allFiles || [], client, nzbPassword);
+        return { ...deepResult, segmentId };
+      } catch (err) {
+        // Deep inspection failed; fall back to signature-ok so 7z still caps at unverified_7z
+        return { status: 'sevenzip-signature-ok', details: { filename: effectiveFilename, deepError: err?.message }, segmentId };
+      }
     }
 
+    // RAR/ZIP path: BODY fetch directly (no redundant STAT)
     let bodyStart = null;
     if (currentMetrics) {
       currentMetrics.bodyCalls += 1;
@@ -835,20 +946,20 @@ async function inspectArchiveViaNntp(file, ctx) {
     try {
       const bodyBuffer = await fetchSegmentBodyWithClient(client, segmentId);
       const decoded = decodeYencBuffer(bodyBuffer, ctx.config.maxDecodedBytes);
-      // console.log('[NZB TRIAGE] Inspecting archive buffer', {
-      //   filename: file.filename,
-      //   subject: file.subject,
-      //   segmentId,
-      //   sampleBytes: decoded.slice(0, 8).toString('hex'),
-      // });
-      let archiveResult = inspectArchiveBuffer(decoded);
+      let archiveResult = inspectArchiveBuffer(decoded, nzbPassword);
       archiveResult = applyHeuristicArchiveHints(archiveResult, decoded, { filename: effectiveFilename });
-      // console.log('[NZB TRIAGE] Archive inspection via NNTP', {
-      //   status: archiveResult.status,
-      //   details: archiveResult.details,
-      //   filename: file.filename,
-      //   subject: file.subject,
-      // });
+      // If the file is named .rar/.7z but no valid archive signature was found,
+      // the content is likely fully encrypted data — upgrade to a blocker.
+      if (archiveResult.status === 'rar-header-not-found' && /\.(rar|7z)(?:\.|$)/i.test(effectiveFilename)) {
+        archiveResult = {
+          status: 'rar-no-signature',
+          details: {
+            ...(archiveResult.details || {}),
+            filename: effectiveFilename,
+            firstBytes: decoded.subarray(0, 8).toString('hex'),
+          },
+        };
+      }
       if (currentMetrics) {
         currentMetrics.bodySuccesses += 1;
         currentMetrics.bodyDurationMs += Date.now() - bodyStart;
@@ -871,17 +982,25 @@ async function inspectArchiveViaNntp(file, ctx) {
 function handleArchiveStatus(status, blockers, warnings) {
   switch (status) {
     case 'rar-stored':
-      return true;
     case 'sevenzip-stored':
       return true;
+    case 'sevenzip-signature-ok':
+      warnings.add('sevenzip-signature-ok');
+      break;
     case 'rar-compressed':
-    case 'rar-encrypted':
-    case 'rar-solid':
-    case 'rar5-unsupported':
+    case 'rar-solid-encrypted':
+    case 'rar-encrypted-headers-decrypt-fail':
+    case 'rar-no-video':
     case 'rar-nested-archive':
+    case 'rar-corrupt-header':
     case 'sevenzip-nested-archive':
     case 'sevenzip-unsupported':
+    case 'sevenzip-encrypted':
     case 'rar-iso-image':
+    case 'rar-disc-structure':
+    case 'rar-insufficient-data':
+    case 'rar-inconsistent-parts':
+    case 'rar-no-signature':
       blockers.add(status);
       break;
     case 'stat-missing':
@@ -890,7 +1009,6 @@ function handleArchiveStatus(status, blockers, warnings) {
       break;
     case 'archive-not-found':
     case 'archive-no-segments':
-    case 'rar-insufficient-data':
     case 'rar-header-not-found':
     case 'sevenzip-insufficient-data':
     case 'io-error':
@@ -900,57 +1018,98 @@ function handleArchiveStatus(status, blockers, warnings) {
     case 'missing-filename':
       warnings.add(status);
       break;
-    case 'sevenzip-untested':
-      warnings.add(status);
-      break;
     default:
       break;
   }
   return false;
 }
 
-function inspectArchiveBuffer(buffer) {
+function inspectArchiveBuffer(buffer, password) {
   if (buffer.length >= RAR4_SIGNATURE.length && buffer.subarray(0, RAR4_SIGNATURE.length).equals(RAR4_SIGNATURE)) {
-    return inspectRar4(buffer);
+    return inspectRar4(buffer, password);
   }
 
   if (buffer.length >= RAR5_SIGNATURE.length && buffer.subarray(0, RAR5_SIGNATURE.length).equals(RAR5_SIGNATURE)) {
-    return inspectRar5(buffer);
+    return inspectRar5(buffer, password);
   }
 
   if (buffer.length >= 6 && buffer[0] === 0x37 && buffer[1] === 0x7A) {
     return inspectSevenZip(buffer);
   }
 
+  if (buffer.length >= 4 && buffer.readUInt32LE(0) === ZIP_LOCAL_FILE_HEADER_SIGNATURE) {
+    return inspectZip(buffer);
+  }
+
   return { status: 'rar-header-not-found' };
 }
 
-function inspectRar4(buffer) {
+function inspectRar4(buffer, password) {
   let offset = RAR4_SIGNATURE.length;
   let storedDetails = null;
   let nestedArchiveCount = 0;
   let playableEntryFound = false;
+  let bufferExhausted = false;
   const sampleEntries = [];
 
   while (offset + 7 <= buffer.length) {
+    const headerCRC = buffer.readUInt16LE(offset);
     const headerType = buffer[offset + 2];
     const headerFlags = buffer.readUInt16LE(offset + 3);
     const headerSize = buffer.readUInt16LE(offset + 5);
 
-    // console.log(`[RAR4] Type: ${headerType}, Size: ${headerSize}, Offset: ${offset}`);
+    // Block type outside the valid RAR4 range (0x72-0x7B): stop parsing.
+    if (headerType < 0x72 || headerType > 0x7B) {
+      break;
+    }
 
     if (headerSize < 7) return { status: 'rar-corrupt-header' };
     if (offset + headerSize > buffer.length) return { status: 'rar-insufficient-data' };
 
+    // Archive header (0x73): detect encrypted headers (MHD_ENCRYPTVER = 0x0080).
+    if (headerType === 0x73 && (headerFlags & 0x0080)) {
+      const saltOffset = offset + headerSize;
+      if (saltOffset + 8 > buffer.length) {
+        return { status: 'rar-encrypted-headers-decrypt-fail', details: { reason: 'no-salt', archiveFlags: headerFlags } };
+      }
+      if (!password) {
+        return { status: 'rar-encrypted-headers-decrypt-fail', details: { reason: 'no-password', archiveFlags: headerFlags } };
+      }
+      const salt = buffer.subarray(saltOffset, saltOffset + 8);
+      let encryptedData = buffer.subarray(saltOffset + 8);
+      const alignedLen = encryptedData.length - (encryptedData.length % 16);
+      encryptedData = encryptedData.subarray(0, alignedLen);
+      if (encryptedData.length < 16) {
+        return { status: 'rar-encrypted-headers-decrypt-fail', details: { reason: 'too-short', archiveFlags: headerFlags } };
+      }
+      try {
+        const decrypted = decryptRar3Header(encryptedData, password, salt);
+        if (decrypted && decrypted.length > 7) {
+          const result = inspectRar4DecryptedHeaders(decrypted, sampleEntries);
+          if (result.status !== 'rar-header-not-found') return result;
+        }
+      } catch (_) {
+        // AES decryption failed
+      }
+      return { status: 'rar-encrypted-headers-decrypt-fail', details: { reason: 'decrypt-failed', archiveFlags: headerFlags } };
+    }
+
     let addSize = 0;
+
+    // ADD_SIZE / LONG_BLOCK flag (0x8000): header has additional data after the header body
+    if ((headerFlags & 0x8000) && headerType !== 0x74) {
+      if (offset + 7 + 4 <= buffer.length) {
+        addSize = buffer.readUInt32LE(offset + 7);
+      }
+    }
 
     if (headerType === 0x74) {
       let pos = offset + 7;
       if (pos + 11 > buffer.length) return { status: 'rar-insufficient-data' };
-      
-      const packSize = buffer.readUInt32LE(pos); 
+
+      const packSize = buffer.readUInt32LE(pos);
       addSize = packSize;
-      
+
       pos += 4; // pack size
       pos += 4; // unpacked size
       pos += 1; // host OS
@@ -968,7 +1127,6 @@ function inspectRar4(buffer) {
         addSize += highPackSize * 4294967296;
         pos += 8; // high pack size (4) + high unpack size (4)
       }
-      // if (headerFlags & 0x0200) pos += 4; // REMOVED: 0x0200 is UNICODE, not size
       if (pos + nameSize > buffer.length) return { status: 'rar-insufficient-data' };
       const name = buffer.slice(pos, pos + nameSize).toString('utf8').replace(/\0/g, '');
       recordSampleEntry(sampleEntries, name);
@@ -978,14 +1136,11 @@ function inspectRar4(buffer) {
       const encrypted = Boolean(headerFlags & 0x0004);
       const solid = Boolean(headerFlags & 0x0010);
 
-      // console.log(`[RAR4] Found entry: "${name}" (method: ${methodByte}, encrypted: ${encrypted}, solid: ${solid})`);
-
-      if (encrypted) return { status: 'rar-encrypted', details: { name, sampleEntries } };
-      if (solid) return { status: 'rar-solid', details: { name, sampleEntries } };
+      if (encrypted && solid) {
+        return { status: 'rar-solid-encrypted', details: { name, sampleEntries } };
+      }
       if (methodByte !== 0x30) {
-         // return { status: 'rar-compressed', details: { name, method: methodByte } };
-         // Don't return early! We need to scan all files to check for nested archives.
-         // But if we find a video file, we can stop and accept.
+        return { status: 'rar-compressed', details: { name, method: methodByte, sampleEntries } };
       }
 
       if (!storedDetails) {
@@ -996,44 +1151,47 @@ function inspectRar4(buffer) {
       } else if (isArchiveEntryName(name)) {
         nestedArchiveCount += 1;
       }
+      if (isDiscStructurePath(name)) {
+        return { status: 'rar-disc-structure', details: { name, sampleEntries } };
+      }
     }
 
     offset += headerSize + addSize;
+    if (offset > buffer.length) {
+      bufferExhausted = true;
+    }
   }
 
   if (storedDetails) {
     if (nestedArchiveCount > 0 && !playableEntryFound) {
-      // console.log('[NZB TRIAGE] Detected nested archive (RAR4)', {
-      //   nestedEntries: nestedArchiveCount,
-      //   sample: storedDetails?.name,
-      // });
       return {
         status: 'rar-nested-archive',
         details: { nestedEntries: nestedArchiveCount, sampleEntries },
       };
     }
-    // console.log('[NZB TRIAGE] RAR4 archive marked stored', {
-    //   playableEntryFound,
-    //   nestedEntries: nestedArchiveCount,
-    //   sample: storedDetails?.name,
-    // });
+    if (!playableEntryFound && sampleEntries.length > 0) {
+      if (bufferExhausted && !sampleEntries.some(isNonVideoMediaFile)) {
+        return { status: 'rar-stored', details: { ...storedDetails, sampleEntries, truncated: true } };
+      }
+      return { status: 'rar-no-video', details: { ...storedDetails, sampleEntries } };
+    }
     return { status: 'rar-stored', details: { ...storedDetails, sampleEntries } };
   }
 
   return { status: 'rar-header-not-found' };
 }
 
-function inspectRar5(buffer) {
+function inspectRar5(buffer, password, headersOnly) {
   let offset = RAR5_SIGNATURE.length;
   let nestedArchiveCount = 0;
   let playableEntryFound = false;
   let storedDetails = null;
+  let bufferExhausted = false;
   const sampleEntries = [];
 
   while (offset < buffer.length) {
     if (offset + 7 > buffer.length) break;
 
-    // const crc = buffer.readUInt32LE(offset);
     let pos = offset + 4;
 
     const sizeRes = readRar5Vint(buffer, pos);
@@ -1054,33 +1212,92 @@ function inspectRar5(buffer) {
     let extraAreaSize = 0;
     let dataSize = 0;
 
-    if (headerType === 0x02 || headerType === 0x03) {
-      const hasExtraArea = (headerFlags & 0x0001) !== 0;
-      const hasData = (headerFlags & 0x0002) !== 0;
+    // Common header flags apply to ALL block types (RAR5 spec):
+    // 0x0001 = extra area present, 0x0002 = data area present
+    const hasExtraArea = (headerFlags & 0x0001) !== 0;
+    const hasData = (headerFlags & 0x0002) !== 0;
 
-      if (hasExtraArea) {
-        const extraRes = readRar5Vint(buffer, pos);
-        if (!extraRes) break;
-        extraAreaSize = extraRes.value;
-        pos += extraRes.bytes;
-      }
-
-      if (hasData) {
-        const dataRes = readRar5Vint(buffer, pos);
-        if (!dataRes) break;
-        dataSize = dataRes.value;
-        pos += dataRes.bytes;
-      }
+    if (hasExtraArea) {
+      const extraRes = readRar5Vint(buffer, pos);
+      if (!extraRes) break;
+      extraAreaSize = extraRes.value;
+      pos += extraRes.bytes;
     }
 
-    // Correct offset calculation:
-    // Block = CRC(4) + Size(VINT) + HeaderData(headerSize) + Data(dataSize)
-    // We already advanced 'pos' past CRC and Size(VINT) to read the Type.
-    // Actually, 'headerSize' includes the Type, Flags, etc.
-    // So the block ends at: (offset + 4 + sizeRes.bytes) + headerSize + dataSize
-    const nextBlockOffset = offset + 4 + sizeRes.bytes + headerSize + dataSize;
-    
-    // console.log(`[RAR5] Block type: ${headerType}, size: ${headerSize}, data: ${dataSize}, next: ${nextBlockOffset}`);
+    if (hasData) {
+      const dataRes = readRar5Vint(buffer, pos);
+      if (!dataRes) break;
+      dataSize = dataRes.value;
+      pos += dataRes.bytes;
+    }
+
+    const nextBlockOffset = offset + 4 + sizeRes.bytes + headerSize + (headersOnly ? 0 : dataSize);
+
+    // RAR5 Archive Encryption Header (type 4): all subsequent headers are AES-256 encrypted.
+    if (headerType === 0x04) {
+      const encVerRes = readRar5Vint(buffer, pos);
+      if (!encVerRes) return { status: 'rar-encrypted-headers-decrypt-fail', details: { reason: 'bad-enc-header', format: 'rar5' } };
+      pos += encVerRes.bytes;
+
+      const encFlagsRes = readRar5Vint(buffer, pos);
+      if (!encFlagsRes) return { status: 'rar-encrypted-headers-decrypt-fail', details: { reason: 'bad-enc-header', format: 'rar5' } };
+      const encFlags = encFlagsRes.value;
+      pos += encFlagsRes.bytes;
+
+      if (pos + 1 > buffer.length) return { status: 'rar-encrypted-headers-decrypt-fail', details: { reason: 'truncated', format: 'rar5' } };
+      const kdfCount = buffer[pos];
+      pos += 1;
+
+      if (pos + 16 > buffer.length) return { status: 'rar-encrypted-headers-decrypt-fail', details: { reason: 'truncated', format: 'rar5' } };
+      const salt = buffer.subarray(pos, pos + 16);
+      pos += 16;
+
+      const hasPswCheck = (encFlags & 0x0001) !== 0;
+      let pswCheck = null;
+      if (hasPswCheck) {
+        if (pos + 12 > buffer.length) return { status: 'rar-encrypted-headers-decrypt-fail', details: { reason: 'truncated', format: 'rar5' } };
+        pswCheck = buffer.subarray(pos, pos + 12);
+        pos += 12;
+      }
+
+      if (!password) {
+        return { status: 'rar-encrypted-headers-decrypt-fail', details: { reason: 'no-password', format: 'rar5' } };
+      }
+
+      const iterations = 1 << kdfCount;
+      const saltWithBlock = Buffer.concat([salt, Buffer.from([0, 0, 0, 1])]);
+      const derivedParts = deriveRar5Key(password, saltWithBlock, iterations);
+
+      if (hasPswCheck && pswCheck) {
+        const derivedCheck = Buffer.alloc(8, 0);
+        for (let i = 0; i < 32; i++) {
+          derivedCheck[i % 8] ^= derivedParts[2][i];
+        }
+        if (!derivedCheck.equals(pswCheck.subarray(0, 8))) {
+          return { status: 'rar-encrypted-headers-decrypt-fail', details: { reason: 'wrong-password', format: 'rar5' } };
+        }
+      }
+
+      const aesKey = derivedParts[0].subarray(0, 32);
+
+      const encOffset = nextBlockOffset;
+      if (encOffset + 16 > buffer.length) {
+        return { status: 'rar-encrypted-headers-decrypt-fail', details: { reason: 'no-encrypted-data', format: 'rar5' } };
+      }
+
+      try {
+        const decryptedHeaders = decryptRar5Headers(buffer, encOffset, aesKey);
+        if (decryptedHeaders && decryptedHeaders.length > 0) {
+          const fakeBuffer = Buffer.concat([RAR5_SIGNATURE, decryptedHeaders]);
+          const result = inspectRar5(fakeBuffer, null, true);
+          if (result.status !== 'rar-header-not-found') return result;
+        }
+      } catch (_) {
+        // Decryption failed
+      }
+
+      return { status: 'rar-encrypted-headers-decrypt-fail', details: { reason: 'decrypt-failed', format: 'rar5' } };
+    }
 
     if (headerType === 0x02) { // File Header
       const fileFlagsRes = readRar5Vint(buffer, pos);
@@ -1101,6 +1318,11 @@ function inspectRar5(buffer) {
 
             const compInfoRes = readRar5Vint(buffer, pos);
             if (compInfoRes) {
+              const compInfo = compInfoRes.value;
+              const methodCode = compInfo & 0x3F;
+              if (methodCode !== 0) {
+                return { status: 'rar-compressed', details: { method: methodCode, compInfo, format: 'rar5', sampleEntries } };
+              }
               pos += compInfoRes.bytes;
 
               const hostOsRes = readRar5Vint(buffer, pos);
@@ -1114,7 +1336,6 @@ function inspectRar5(buffer) {
 
                   if (pos + nameLen <= buffer.length) {
                     const name = buffer.slice(pos, pos + nameLen).toString('utf8');
-                    // console.log(`[RAR5] Found entry: "${name}"`);
 
                     if (!storedDetails) storedDetails = { name };
                     recordSampleEntry(sampleEntries, name);
@@ -1127,6 +1348,9 @@ function inspectRar5(buffer) {
                     } else if (isArchiveEntryName(name)) {
                       nestedArchiveCount += 1;
                     }
+                    if (isDiscStructurePath(name)) {
+                      return { status: 'rar-disc-structure', details: { name, sampleEntries } };
+                    }
                   }
                 }
               }
@@ -1137,28 +1361,29 @@ function inspectRar5(buffer) {
     }
 
     offset = nextBlockOffset;
+    if (offset > buffer.length) {
+      bufferExhausted = true;
+    }
   }
 
   if (storedDetails) {
     if (nestedArchiveCount > 0 && !playableEntryFound) {
-      // console.log('[NZB TRIAGE] Detected nested archive (RAR5)', {
-      //   nestedEntries: nestedArchiveCount,
-      //   sample: storedDetails?.name,
-      // });
       return {
         status: 'rar-nested-archive',
         details: { nestedEntries: nestedArchiveCount, sampleEntries },
       };
     }
-    // console.log('[NZB TRIAGE] RAR5 archive marked stored', {
-    //   playableEntryFound,
-    //   nestedEntries: nestedArchiveCount,
-    //   sample: storedDetails?.name,
-    // });
+    if (!playableEntryFound && sampleEntries.length > 0) {
+      if (bufferExhausted && !sampleEntries.some(isNonVideoMediaFile)) {
+        return { status: 'rar-stored', details: { ...storedDetails, sampleEntries, truncated: true } };
+      }
+      return { status: 'rar-no-video', details: { ...storedDetails, sampleEntries } };
+    }
     return { status: 'rar-stored', details: { ...storedDetails, sampleEntries } };
   }
 
-  return { status: 'rar-stored', details: { note: 'rar5-header-assumed-stored', sampleEntries } };
+  // RAR5: couldn't parse file entries — don't assume stored
+  return { status: 'rar-header-not-found', details: { note: 'rar5-no-file-entries', sampleEntries } };
 }
 
 function readRar5Vint(buffer, offset) {
@@ -1178,20 +1403,103 @@ function readRar5Vint(buffer, offset) {
   return null;
 }
 
-function inspectSevenZip(buffer) {
-  try {
-    const analyzer = new SevenZipAnalyzer(buffer);
-    const outcome = analyzer.evaluate();
-    return outcome.copyOnly
-      ? { status: 'sevenzip-stored' }
-      : { status: 'sevenzip-unsupported', details: outcome.reason };
-  } catch (error) {
-    if (error?.code === 'SEVENZIP_INSUFFICIENT_DATA') {
-      return { status: 'sevenzip-insufficient-data', details: error.message };
+function inspectZip(buffer) {
+  let offset = 0;
+  let nestedArchiveCount = 0;
+  let playableEntryFound = false;
+  let storedDetails = null;
+  const sampleEntries = [];
+
+  while (offset + 4 <= buffer.length) {
+    const signature = buffer.readUInt32LE(offset);
+
+    if (signature === ZIP_CENTRAL_DIRECTORY_SIGNATURE || signature === ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE) {
+      break;
     }
-    return { status: 'sevenzip-unsupported', details: error?.message || 'Unknown 7z error' };
+
+    if (signature !== ZIP_LOCAL_FILE_HEADER_SIGNATURE) {
+      break;
+    }
+
+    if (offset + 30 > buffer.length) return { status: 'rar-insufficient-data' };
+
+    const flags = buffer.readUInt16LE(offset + 6);
+    const method = buffer.readUInt16LE(offset + 8);
+    const compressedSize = buffer.readUInt32LE(offset + 18);
+    const nameLength = buffer.readUInt16LE(offset + 26);
+    const extraLength = buffer.readUInt16LE(offset + 28);
+
+    const headerEnd = offset + 30 + nameLength + extraLength;
+    if (headerEnd > buffer.length) return { status: 'rar-insufficient-data' };
+
+    const name = buffer.slice(offset + 30, offset + 30 + nameLength).toString('utf8').replace(/\0/g, '');
+    recordSampleEntry(sampleEntries, name);
+
+    if (!storedDetails) {
+      storedDetails = { name, method, format: 'zip' };
+    }
+
+    if (isIsoFileName(name)) {
+      return { status: 'rar-iso-image', details: { name, sampleEntries } };
+    }
+
+    if ((flags & 0x0001) !== 0) {
+      return { status: 'rar-encrypted', details: { name, format: 'zip', sampleEntries } };
+    }
+
+    if (method !== 0) {
+      return { status: 'rar-compressed', details: { name, method, format: 'zip', sampleEntries } };
+    }
+
+    if (isVideoFileName(name)) {
+      playableEntryFound = true;
+    } else if (isArchiveEntryName(name)) {
+      nestedArchiveCount += 1;
+    }
+    if (isDiscStructurePath(name)) {
+      return { status: 'rar-disc-structure', details: { name, sampleEntries } };
+    }
+
+    if (compressedSize === 0xFFFFFFFF) return { status: 'rar-insufficient-data' };
+
+    const nextOffset = headerEnd + compressedSize;
+    if (nextOffset <= offset) return { status: 'rar-insufficient-data' };
+    if (nextOffset > buffer.length) return { status: 'rar-insufficient-data' };
+    offset = nextOffset;
   }
+
+  if (storedDetails) {
+    if (nestedArchiveCount > 0 && !playableEntryFound) {
+      return {
+        status: 'rar-nested-archive',
+        details: { nestedEntries: nestedArchiveCount, sampleEntries },
+      };
+    }
+    return { status: 'rar-stored', details: { ...storedDetails, sampleEntries } };
+  }
+
+  return { status: 'rar-header-not-found' };
 }
+
+// Simple 7z signature check (used as fallback by inspectArchiveBuffer)
+function inspectSevenZip(buffer) {
+  if (buffer.length < 6
+    || buffer[0] !== 0x37
+    || buffer[1] !== 0x7A
+    || buffer[2] !== 0xBC
+    || buffer[3] !== 0xAF
+    || buffer[4] !== 0x27
+    || buffer[5] !== 0x1C) {
+    return { status: 'sevenzip-insufficient-data', details: 'invalid or missing 7z signature' };
+  }
+  return { status: 'sevenzip-signature-ok' };
+}
+
+// ---------------------------------------------------------------------------
+// 7z deep inspection: fetch start header (first segment of first part) and
+// footer (last segment of last part), then parse the metadata header in pure
+// JS to determine if all coders are copy-only (stored).
+// ---------------------------------------------------------------------------
 
 function buildDecision(decision, blockers, warnings, meta) {
   return {
@@ -1202,371 +1510,1094 @@ function buildDecision(decision, blockers, warnings, meta) {
   };
 }
 
-class SevenZipAnalyzer {
-  constructor(buffer) {
-    this.buffer = buffer;
+function findSevenZipParts(files, targetFile) {
+  const targetName = targetFile.filename || guessFilenameFromSubject(targetFile.subject);
+  if (!targetName) return [targetFile];
+  const match = targetName.match(/^(.+)\.7z(?:\.\d{3})?$/i);
+  if (!match) return [targetFile];
+  const baseName = match[1].toLowerCase();
+  const parts = files.filter((f) => {
+    const name = f.filename || guessFilenameFromSubject(f.subject);
+    if (!name) return false;
+    const m = name.match(/^(.+)\.7z(?:\.\d{3})?$/i);
+    return m && m[1].toLowerCase() === baseName;
+  });
+  parts.sort((a, b) => {
+    const nameA = (a.filename || guessFilenameFromSubject(a.subject) || '').toLowerCase();
+    const nameB = (b.filename || guessFilenameFromSubject(b.subject) || '').toLowerCase();
+    const mA = nameA.match(/\.7z\.(\d{3})$/);
+    const mB = nameB.match(/\.7z\.(\d{3})$/);
+    const pA = mA ? parseInt(mA[1], 10) : 0; // .7z alone = part 0
+    const pB = mB ? parseInt(mB[1], 10) : 0;
+    return pA - pB;
+  });
+  return parts.length > 0 ? parts : [targetFile];
+}
+
+async function inspectSevenZipDeep(file, ctx, allFiles, client, nzbPassword) {
+  const parts = findSevenZipParts(allFiles, file);
+  const firstPart = parts[0];
+  const lastPart = parts[parts.length - 1];
+
+  // --- Fetch first segment of first part (contains 7z start header) ---
+  const firstSegments = firstPart.segments ?? [];
+  if (firstSegments.length === 0) {
+    return { status: 'sevenzip-signature-ok', details: { reason: 'no-first-segments' } };
+  }
+  const firstSegId = firstSegments[0]?.id;
+  if (!firstSegId) {
+    return { status: 'sevenzip-signature-ok', details: { reason: 'no-first-segment-id' } };
   }
 
-  evaluate() {
-    if (!SevenZipAnalyzer.hasSignature(this.buffer)) {
-      throw Object.assign(new Error('Missing 7z signature'), { code: 'SEVENZIP_INSUFFICIENT_DATA' });
-    }
-    if (this.buffer.length < 32) {
-      throw Object.assign(new Error('Incomplete 7z start header'), { code: 'SEVENZIP_INSUFFICIENT_DATA' });
-    }
+  const headerBody = await fetchSegmentBodyWithClient(client, firstSegId);
+  const headerBuf = decodeYencBuffer(headerBody, 2 * 1024 * 1024);
 
-    const nextHeaderOffset = Number(this.buffer.readBigUInt64LE(12));
-    const nextHeaderSize = Number(this.buffer.readBigUInt64LE(20));
-    const headerStart = 32 + nextHeaderOffset;
-    const headerEnd = headerStart + nextHeaderSize;
-    if (headerStart < 32 || headerEnd > this.buffer.length) {
-      throw Object.assign(new Error('7z next header outside buffered range'), { code: 'SEVENZIP_INSUFFICIENT_DATA' });
-    }
-
-    const headerSlice = this.buffer.slice(headerStart, headerEnd);
-    const parser = new SevenZipHeaderParser(headerSlice);
-    return parser.parse();
+  // Verify signature
+  if (headerBuf.length < 32 || !headerBuf.subarray(0, 6).equals(SEVENZIP_SIGNATURE)) {
+    return { status: 'sevenzip-insufficient-data', details: { reason: 'invalid-signature' } };
   }
 
-  static hasSignature(buffer) {
-    return buffer.length >= 6
-      && buffer[0] === 0x37
-      && buffer[1] === 0x7A
-      && buffer[2] === 0xBC
-      && buffer[3] === 0xAF
-      && buffer[4] === 0x27
-      && buffer[5] === 0x1C;
+  const nextHeaderOffset = Number(headerBuf.readBigUInt64LE(12));
+  const nextHeaderSize = Number(headerBuf.readBigUInt64LE(20));
+
+  if (nextHeaderSize <= 0 || nextHeaderSize > 10 * 1024 * 1024) {
+    // Metadata > 10MB is unreasonable; bail out
+    return { status: 'sevenzip-signature-ok', details: { reason: 'metadata-too-large', nextHeaderSize } };
+  }
+
+  // --- Fetch last segment of last part (contains 7z metadata footer) ---
+  const lastSegments = lastPart.segments ?? [];
+  if (lastSegments.length === 0) {
+    return { status: 'sevenzip-signature-ok', details: { reason: 'no-last-segments' } };
+  }
+  const lastSegId = lastSegments[lastSegments.length - 1]?.id;
+  if (!lastSegId) {
+    return { status: 'sevenzip-signature-ok', details: { reason: 'no-last-segment-id' } };
+  }
+
+  const footerBody = await fetchSegmentBodyWithClient(client, lastSegId);
+  const footerBuf = decodeYencBuffer(footerBody, 2 * 1024 * 1024);
+
+  // The metadata header lives at the very end of the archive.
+  // footerBuf is the decoded last segment, so the metadata should be
+  // in the last nextHeaderSize bytes of footerBuf.
+  if (footerBuf.length < nextHeaderSize) {
+    return { status: 'sevenzip-signature-ok', details: { reason: 'footer-too-small', footerLen: footerBuf.length, needed: nextHeaderSize } };
+  }
+
+  // Try parsing from the expected position first, then scan backwards
+  // in case the archive doesn't fill the segment to the exact end.
+  const attempts = [];
+  // Attempt 1: metadata at very end
+  attempts.push(footerBuf.subarray(footerBuf.length - nextHeaderSize));
+  // Attempt 2: scan for kHeader (0x01) or kEncodedHeader (0x17) within last region
+  for (let offset = footerBuf.length - nextHeaderSize; offset >= Math.max(0, footerBuf.length - nextHeaderSize - 256); offset--) {
+    const byte = footerBuf[offset];
+    if ((byte === 0x01 || byte === 0x17) && offset !== footerBuf.length - nextHeaderSize) {
+      attempts.push(footerBuf.subarray(offset));
+      break;
+    }
+  }
+
+  let lastError = null;
+  for (const metadataSlice of attempts) {
+    const parseResult = parseSevenZipMetadata(metadataSlice);
+    if (parseResult.error) {
+      lastError = { error: parseResult.error, sliceLen: metadataSlice.length, firstBytes: metadataSlice.subarray(0, Math.min(8, metadataSlice.length)).toString('hex') };
+      continue;
+    }
+
+    // If encoded header, try to decompress the real header from footerBuf
+    if (parseResult.encodedHeader && parseResult.encodedInfo) {
+      try {
+        const realHeader = await decompressEncodedHeader(parseResult.encodedInfo, footerBuf, nextHeaderSize);
+        if (realHeader) {
+          const innerResult = parseSevenZipMetadata(realHeader);
+          if (!innerResult.error && !innerResult.encodedHeader) {
+            const fnames = innerResult.filenames || [];
+            const nestedArchive = sz_detectNestedArchive(fnames);
+            if (innerResult.compressed) {
+              return { status: 'sevenzip-unsupported', details: { reason: 'compressed-coder-detected', nextHeaderSize, footerLen: footerBuf.length, encodedHeader: true, debug: innerResult.debug, filenames: fnames } };
+            }
+            if (nestedArchive) {
+              return { status: 'sevenzip-nested-archive', details: { reason: 'nested-archive-detected', nestedType: nestedArchive, nextHeaderSize, footerLen: footerBuf.length, encodedHeader: true, filenames: fnames } };
+            }
+            if (sz_hasDiscStructure(fnames)) {
+              return { status: 'sevenzip-unsupported', details: { reason: 'disc-structure-detected', nextHeaderSize, footerLen: footerBuf.length, encodedHeader: true, filenames: fnames } };
+            }
+            const innerStatus = sz_hasPlayableVideo(fnames) ? 'sevenzip-stored' : 'sevenzip-signature-ok';
+            return { status: innerStatus, details: { reason: 'copy-only-confirmed', nextHeaderSize, footerLen: footerBuf.length, encodedHeader: true, debug: innerResult.debug, filenames: fnames } };
+          }
+          // Inner parse failed
+          return { status: 'sevenzip-signature-ok', details: { reason: 'encoded-header-inner-parse-failed', nextHeaderSize, footerLen: footerBuf.length, innerError: innerResult.error, realHeaderLen: realHeader.length, realHeaderFirst8: realHeader.subarray(0, Math.min(8, realHeader.length)).toString('hex') } };
+        }
+        // realHeader was null — check if the encoded header is encrypted (AES)
+        const method = parseResult.encodedInfo?.coderMethod || '';
+        if (method.startsWith('06f107')) {
+          // If we have a password from NZB metadata, try to decrypt the encoded header
+          if (nzbPassword && parseResult.encodedInfo.coders?.length >= 1) {
+            try {
+              const decryptedHeader = await decryptEncodedHeader(parseResult.encodedInfo, footerBuf, nextHeaderSize, nzbPassword);
+              if (decryptedHeader) {
+                const innerResult = parseSevenZipMetadata(decryptedHeader);
+                if (!innerResult.error && !innerResult.encodedHeader) {
+                  const fnames = innerResult.filenames || [];
+                  const nestedArchive = sz_detectNestedArchive(fnames);
+                  if (innerResult.compressed) {
+                    return { status: 'sevenzip-unsupported', details: { reason: 'encrypted-compressed-coder', nextHeaderSize, footerLen: footerBuf.length, encodedHeader: true, encrypted: true, debug: innerResult.debug, filenames: fnames } };
+                  }
+                  if (nestedArchive) {
+                    return { status: 'sevenzip-nested-archive', details: { reason: 'encrypted-nested-archive', nestedType: nestedArchive, nextHeaderSize, footerLen: footerBuf.length, encodedHeader: true, encrypted: true, filenames: fnames } };
+                  }
+                  if (sz_hasDiscStructure(fnames)) {
+                    return { status: 'sevenzip-unsupported', details: { reason: 'encrypted-disc-structure', nextHeaderSize, footerLen: footerBuf.length, encodedHeader: true, encrypted: true, filenames: fnames } };
+                  }
+                  const innerStatus = sz_hasPlayableVideo(fnames) ? 'sevenzip-stored' : 'sevenzip-signature-ok';
+                  return { status: innerStatus, details: { reason: 'encrypted-copy-confirmed', nextHeaderSize, footerLen: footerBuf.length, encodedHeader: true, encrypted: true, debug: innerResult.debug, filenames: fnames } };
+                }
+              }
+            } catch (decryptErr) {
+              // Decryption failed — fall through to sevenzip-encrypted
+            }
+          }
+          return { status: 'sevenzip-encrypted', details: { reason: 'aes-encrypted-header', nextHeaderSize, footerLen: footerBuf.length, encodedInfo: parseResult.encodedInfo } };
+        }
+        return { status: 'sevenzip-signature-ok', details: { reason: 'encoded-header-decompress-null', nextHeaderSize, footerLen: footerBuf.length, encodedInfo: parseResult.encodedInfo } };
+      } catch (decompErr) {
+        return { status: 'sevenzip-signature-ok', details: { reason: 'encoded-header-decompress-error', nextHeaderSize, footerLen: footerBuf.length, decompError: decompErr?.message, encodedInfo: parseResult.encodedInfo } };
+      }
+    } else if (parseResult.encodedHeader) {
+      return { status: 'sevenzip-signature-ok', details: { reason: 'encoded-header-no-info', nextHeaderSize, footerLen: footerBuf.length, debug: parseResult.debug } };
+    }
+
+    if (parseResult.compressed) {
+      return { status: 'sevenzip-unsupported', details: { reason: 'compressed-coder-detected', nextHeaderSize, footerLen: footerBuf.length, debug: parseResult.debug, filenames: parseResult.filenames || [] } };
+    }
+    const fnames = parseResult.filenames || [];
+    const nestedArchive = sz_detectNestedArchive(fnames);
+    if (nestedArchive) {
+      return { status: 'sevenzip-nested-archive', details: { reason: 'nested-archive-detected', nestedType: nestedArchive, nextHeaderSize, footerLen: footerBuf.length, filenames: fnames } };
+    }
+    if (sz_hasDiscStructure(fnames)) {
+      return { status: 'sevenzip-unsupported', details: { reason: 'disc-structure-detected', nextHeaderSize, footerLen: footerBuf.length, filenames: fnames } };
+    }
+    const finalStatus = sz_hasPlayableVideo(fnames) ? 'sevenzip-stored' : 'sevenzip-signature-ok';
+    return { status: finalStatus, details: { reason: 'copy-only-confirmed', nextHeaderSize, footerLen: footerBuf.length, debug: parseResult.debug, filenames: fnames } };
+  }
+
+  // All attempts failed
+  return { status: 'sevenzip-signature-ok', details: {
+    reason: 'metadata-parse-error',
+    message: lastError?.error || '7z-eof',
+    nextHeaderSize,
+    footerLen: footerBuf.length,
+    sliceLen: lastError?.sliceLen,
+    firstBytes: lastError?.firstBytes,
+  } };
+}
+
+// ---------------------------------------------------------------------------
+// Pure-JS 7z metadata header parser — reads just enough to determine if all
+// coder methods are copy (0x00) or compressed.
+// ---------------------------------------------------------------------------
+
+function parseSevenZipMetadata(buffer) {
+  const reader = { buf: buffer, pos: 0 };
+  try {
+    const rootId = sz_readByte(reader);
+    // 0x17 = kEncodedHeader — the metadata header itself is LZMA-compressed.
+    // Parse the mini StreamsInfo to extract compression details so the caller
+    // can decompress the real header from the archive start.
+    if (rootId === 0x17) {
+      try {
+        const info = sz_parseEncodedHeaderInfo(reader);
+        return { compressed: false, encodedHeader: true, encodedInfo: info, debug: { rootId: '0x17-encoded', ...info } };
+      } catch (err) {
+        return { compressed: false, encodedHeader: true, debug: { rootId: '0x17-encoded', parseError: err?.message } };
+      }
+    }
+    // 0x01 = kHeader (uncompressed metadata — we can parse coders)
+    if (rootId !== 0x01) return { error: 'unexpected-root-id' };
+
+    let streamsResult = null;
+    let filenames = null;
+    while (true) {
+      const sectionId = sz_readByte(reader);
+      if (sectionId === 0x00) break; // kEnd
+      if (sectionId === 0x04) { // kMainStreamsInfo
+        streamsResult = sz_parseStreamsInfo(reader);
+      } else if (sectionId === 0x02) { // kArchiveProperties
+        sz_skipPropertyBlock(reader);
+      } else if (sectionId === 0x03) { // kAdditionalStreamsInfo
+        return { error: 'additional-streams-before-main' };
+      } else if (sectionId === 0x05) { // kFilesInfo
+        filenames = sz_parseFilesInfo(reader);
+      } else {
+        return { error: `unsupported-section-${sectionId}` };
+      }
+    }
+    const compressed = streamsResult ? streamsResult.compressed : false;
+    return { compressed, debug: streamsResult?.debug, filenames: filenames || [] };
+  } catch (err) {
+    return { error: err?.message || 'parse-exception' };
   }
 }
 
-class SevenZipHeaderParser {
-  constructor(buffer) {
-    this.buffer = buffer;
-    this.pos = 0;
+function sz_parseStreamsInfo(reader) {
+  let copyOnly = false;
+  let sawUnpack = false;
+  let debug = null;
+  let numFolders = 0;
+  let folders = [];
+  while (true) {
+    const id = sz_readByte(reader);
+    if (id === 0x00) break; // kEnd
+    if (id === 0x06) { // kPackInfo
+      sz_skipPackInfo(reader);
+    } else if (id === 0x07) { // kUnpackInfo
+      const result = sz_parseUnpackInfo(reader);
+      copyOnly = result.copyOnly;
+      debug = result.debug;
+      numFolders = result.numFolders;
+      folders = result.folders;
+      sawUnpack = true;
+    } else if (id === 0x08) { // kSubStreamsInfo
+      sz_skipSubStreamsInfo(reader, numFolders, folders);
+    } else {
+      throw new Error(`unsupported-streams-block-${id}`);
+    }
+  }
+  return { copyOnly: sawUnpack ? copyOnly : false, compressed: sawUnpack ? !copyOnly : false, debug };
+}
+
+function sz_parseUnpackInfo(reader) {
+  if (sz_readByte(reader) !== 0x0B) throw new Error('expected-kFolder'); // kFolder
+  const numFolders = sz_readNumber(reader);
+  if (sz_readByte(reader) !== 0) throw new Error('external-folders-unsupported');
+
+  let allCopy = true;
+  const folders = [];
+  const coderDebug = [];
+  for (let i = 0; i < numFolders; i++) {
+    const folder = sz_parseFolder(reader);
+    folders.push(folder);
+    if (!folder.copyOnly) allCopy = false;
+    coderDebug.push(folder.coderInfo);
   }
 
-  parse() {
-    const rootId = this.readByte();
-    if (rootId === SEVEN_ZIP_IDS.kEncodedHeader) {
-      throw new Error('Encoded 7z headers are not supported');
-    }
-    if (rootId !== SEVEN_ZIP_IDS.kHeader) {
-      throw new Error('Unexpected 7z header identifier');
-    }
-
-    let copyOnly = false;
-    while (true) {
-      const sectionId = this.readByte();
-      if (sectionId === SEVEN_ZIP_IDS.kEnd) break;
-      switch (sectionId) {
-        case SEVEN_ZIP_IDS.kArchiveProperties:
-          this.skipPropertyBlock();
-          break;
-        case SEVEN_ZIP_IDS.kAdditionalStreamsInfo:
-          this.skipStreamsInfo();
-          break;
-        case SEVEN_ZIP_IDS.kMainStreamsInfo:
-          copyOnly = this.parseStreamsInfo();
-          break;
-        case SEVEN_ZIP_IDS.kFilesInfo:
-          this.skipFilesInfo();
-          break;
-        default:
-          throw new Error(`Unsupported 7z header section: ${sectionId}`);
-      }
-    }
-
-    return {
-      copyOnly,
-      reason: copyOnly ? undefined : 'compressed-coder-detected',
-    };
+  if (sz_readByte(reader) !== 0x0C) throw new Error('expected-kCodersUnpackSize');
+  for (const folder of folders) {
+    for (let i = 0; i < folder.totalOutStreams; i++) sz_readNumber(reader);
   }
 
-  parseStreamsInfo() {
-    let copyOnly = false;
-    let sawUnpackInfo = false;
-    while (true) {
-      const id = this.readByte();
-      if (id === SEVEN_ZIP_IDS.kEnd) break;
-      if (id === SEVEN_ZIP_IDS.kPackInfo) {
-        this.skipPackInfo();
-      } else if (id === SEVEN_ZIP_IDS.kUnpackInfo) {
-        const folderResult = this.parseUnpackInfo();
-        copyOnly = folderResult;
-        sawUnpackInfo = true;
-      } else if (id === SEVEN_ZIP_IDS.kSubStreamsInfo) {
-        this.skipSubStreamsInfo();
-      } else {
-        throw new Error(`Unsupported StreamsInfo block id ${id}`);
-      }
-    }
-    return sawUnpackInfo ? copyOnly : false;
+  const nextId = sz_readByte(reader);
+  if (nextId === 0x0A) { // kCRC
+    sz_skipBoolVector(reader, numFolders, true);
+    if (sz_readByte(reader) !== 0x00) throw new Error('expected-kEnd-after-crc');
+  } else if (nextId !== 0x00) {
+    throw new Error('unexpected-after-unpack');
   }
 
-  parseUnpackInfo() {
-    if (this.readByte() !== SEVEN_ZIP_IDS.kFolder) {
-      throw new Error('Expected Folder block in UnpackInfo');
-    }
-    const numFolders = this.readNumber();
-    if (this.readByte() !== 0) {
-      throw new Error('External Folder references are not supported');
-    }
+  return { copyOnly: allCopy, numFolders, folders, debug: { numFolders, coderDebug } };
+}
 
-    const folders = [];
-    let copyOnly = true;
-    for (let i = 0; i < numFolders; i += 1) {
-      const folder = this.parseFolder();
-      folders.push(folder);
-      copyOnly = copyOnly && folder.copyOnly;
-    }
-
-    if (this.readByte() !== SEVEN_ZIP_IDS.kCodersUnpackSize) {
-      throw new Error('Expected CodersUnpackSize block');
-    }
-    folders.forEach((folder) => {
-      for (let i = 0; i < folder.totalOutStreams; i += 1) {
-        this.readNumber();
-      }
-    });
-
-    const nextId = this.readByte();
-    if (nextId === SEVEN_ZIP_IDS.kCRC) {
-      const definedCount = this.skipBoolVector(folders.length);
-      for (let i = 0; i < definedCount; i += 1) {
-        this.readUInt32();
-      }
-      this.expectByte(SEVEN_ZIP_IDS.kEnd);
-    } else if (nextId !== SEVEN_ZIP_IDS.kEnd) {
-      throw new Error('Unexpected identifier after CodersUnpackSize');
-    }
-
-    return copyOnly;
-  }
-
-  parseFolder() {
-    const numCoders = this.readNumber();
-    if (numCoders <= 0 || numCoders > 32) {
-      throw new Error('Invalid coder count in folder');
-    }
-    let totalInStreams = 0;
-    let totalOutStreams = 0;
-    let copyOnly = true;
-
-    for (let i = 0; i < numCoders; i += 1) {
-      const coder = this.parseCoder();
-      totalInStreams += coder.inStreams;
-      totalOutStreams += coder.outStreams;
-      copyOnly = copyOnly && coder.isCopyMethod;
-    }
-
-    const numBindPairs = totalOutStreams > 0 ? totalOutStreams - 1 : 0;
-    for (let i = 0; i < numBindPairs; i += 1) {
-      this.readNumber();
-      this.readNumber();
-    }
-
-    const numPackedStreams = totalInStreams - numBindPairs;
-    if (numPackedStreams < 0) {
-      throw new Error('Invalid packed stream count');
-    }
-    if (numPackedStreams > 1) {
-      for (let i = 0; i < numPackedStreams; i += 1) {
-        this.readNumber();
-      }
-    }
-
-    return { copyOnly, totalOutStreams };
-  }
-
-  parseCoder() {
-    const mainByte = this.readByte();
-    const idSize = (mainByte & 0x0F) + 1;
+function sz_parseFolder(reader) {
+  const numCoders = sz_readNumber(reader);
+  if (numCoders <= 0 || numCoders > 32) throw new Error('bad-coder-count');
+  let totalIn = 0;
+  let totalOut = 0;
+  let copyOnly = true;
+  const coderInfo = [];
+  for (let i = 0; i < numCoders; i++) {
+    const mainByte = sz_readByte(reader);
+    const idSize = mainByte & 0x0F; // CodecIdSize (0 = Copy method)
     const isSimple = (mainByte & 0x10) === 0;
     const hasAttributes = (mainByte & 0x20) !== 0;
-    const hasAltInStreams = (mainByte & 0x40) !== 0;
-    const hasAltOutStreams = (mainByte & 0x80) !== 0;
-
-    const methodId = this.readBytes(idSize);
-    let inStreams = isSimple ? 1 : this.readNumber();
-    let outStreams = isSimple ? 1 : this.readNumber();
-    if (hasAltInStreams) inStreams = this.readNumber();
-    if (hasAltOutStreams) outStreams = this.readNumber();
+    const methodId = idSize > 0 ? sz_readBytes(reader, idSize) : Buffer.alloc(0);
+    let inStreams = isSimple ? 1 : sz_readNumber(reader);
+    let outStreams = isSimple ? 1 : sz_readNumber(reader);
     if (hasAttributes) {
-      const attrSize = this.readNumber();
-      this.skip(attrSize);
+      const attrSize = sz_readNumber(reader);
+      sz_skip(reader, attrSize);
     }
-
-    const isCopyMethod = methodId.length === 1 && methodId[0] === 0x00;
-    return { isCopyMethod, inStreams, outStreams };
+    totalIn += inStreams;
+    totalOut += outStreams;
+    // Copy/Store method: codec ID is a single byte 0x00
+    // AES encryption (06f107xx) is treated as transparent — not a compression method
+    const methodHex = Buffer.from(methodId).toString('hex');
+    const isCopy = (idSize === 1 && methodId[0] === 0x00) || idSize === 0;
+    const isAES = methodHex.startsWith('06f107');
+    if (!isCopy && !isAES) copyOnly = false;
+    coderInfo.push({ mainByte: '0x' + mainByte.toString(16), idSize, methodHex, isCopy });
   }
+  const numBindPairs = totalOut > 0 ? totalOut - 1 : 0;
+  for (let i = 0; i < numBindPairs; i++) { sz_readNumber(reader); sz_readNumber(reader); }
+  const numPacked = totalIn - numBindPairs;
+  if (numPacked > 1) { for (let i = 0; i < numPacked; i++) sz_readNumber(reader); }
+  return { copyOnly, totalOutStreams: totalOut, coderInfo };
+}
 
-  skipPropertyBlock() {
-    while (true) {
-      const id = this.readByte();
-      if (id === SEVEN_ZIP_IDS.kEnd) break;
-      const size = this.readNumber();
-      this.skip(size);
+function sz_skipPackInfo(reader) {
+  sz_readNumber(reader); // packPos
+  const numPackStreams = sz_readNumber(reader);
+  while (true) {
+    const id = sz_readByte(reader);
+    if (id === 0x00) break; // kEnd
+    if (id === 0x09) { // kSize
+      for (let i = 0; i < numPackStreams; i++) sz_readNumber(reader);
+    } else if (id === 0x0A) { // kCRC
+      sz_skipBoolVector(reader, numPackStreams, true);
+    } else {
+      // Unknown sub-block in PackInfo; skip by reading size + data
+      const size = sz_readNumber(reader);
+      sz_skip(reader, size);
     }
-  }
-
-  skipStreamsInfo() {
-    this.parseStreamsInfo();
-  }
-
-  skipPackInfo() {
-    this.readNumber();
-    const numPackStreams = this.readNumber();
-    let id = this.readByte();
-    if (id === SEVEN_ZIP_IDS.kSize) {
-      for (let i = 0; i < numPackStreams; i += 1) {
-        this.readNumber();
-      }
-      id = this.readByte();
-    }
-    if (id === SEVEN_ZIP_IDS.kCRC) {
-      const defined = this.skipBoolVector(numPackStreams);
-      for (let i = 0; i < defined; i += 1) {
-        this.readUInt32();
-      }
-      id = this.readByte();
-    }
-    if (id !== SEVEN_ZIP_IDS.kEnd) {
-      throw new Error('Malformed PackInfo block');
-    }
-  }
-
-  skipSubStreamsInfo() {
-    while (true) {
-      const id = this.readByte();
-      if (id === SEVEN_ZIP_IDS.kEnd) break;
-      const size = this.readNumber();
-      this.skip(size);
-    }
-  }
-
-  skipFilesInfo() {
-    const numFiles = this.readNumber();
-    if (numFiles < 0) {
-      throw new Error('Invalid file count in FilesInfo');
-    }
-    while (true) {
-      const propertyType = this.readByte();
-      if (propertyType === SEVEN_ZIP_IDS.kEnd) break;
-      const size = this.readNumber();
-      this.skip(size);
-    }
-  }
-
-  skipBoolVector(count) {
-    const allDefined = this.readByte();
-    if (allDefined !== 0) {
-      return count;
-    }
-    let mask = 0;
-    let value = 0;
-    let defined = 0;
-    for (let i = 0; i < count; i += 1) {
-      if (mask === 0) {
-        value = this.readByte();
-        mask = 0x01;
-      }
-      if (value & mask) defined += 1;
-      mask <<= 1;
-      if (mask > 0x80) mask = 0;
-    }
-    return defined;
-  }
-
-  expectByte(expected) {
-    const actual = this.readByte();
-    if (actual !== expected) {
-      throw new Error(`Expected token ${expected} but received ${actual}`);
-    }
-  }
-
-  readUInt32() {
-    if (this.pos + 4 > this.buffer.length) {
-      throw Object.assign(new Error('Unexpected end of buffer'), { code: 'SEVENZIP_INSUFFICIENT_DATA' });
-    }
-    const value = this.buffer.readUInt32LE(this.pos);
-    this.pos += 4;
-    return value;
-  }
-
-  readBytes(length) {
-    if (this.pos + length > this.buffer.length) {
-      throw Object.assign(new Error('Unexpected end of buffer'), { code: 'SEVENZIP_INSUFFICIENT_DATA' });
-    }
-    const slice = this.buffer.slice(this.pos, this.pos + length);
-    this.pos += length;
-    return slice;
-  }
-
-  readByte() {
-    if (this.pos >= this.buffer.length) {
-      throw Object.assign(new Error('Unexpected end of buffer'), { code: 'SEVENZIP_INSUFFICIENT_DATA' });
-    }
-    const value = this.buffer[this.pos];
-    this.pos += 1;
-    return value;
-  }
-
-  readNumber() {
-    const firstByte = this.readByte();
-    let mask = 0x80;
-    let additional = 0;
-    while (additional < 8 && (firstByte & mask) === 0) {
-      mask >>= 1;
-      additional += 1;
-    }
-    if (mask === 0) {
-      let value = 0n;
-      for (let i = 0; i < 8; i += 1) {
-        value = (value << 8n) | BigInt(this.readByte());
-      }
-      return Number(value);
-    }
-    let value = BigInt(firstByte & (mask - 1));
-    for (let i = 0; i < additional; i += 1) {
-      value = (value << 8n) | BigInt(this.readByte());
-    }
-    return Number(value);
-  }
-
-  skip(length) {
-    if (this.pos + length > this.buffer.length) {
-      throw Object.assign(new Error('Unexpected end of buffer during skip'), { code: 'SEVENZIP_INSUFFICIENT_DATA' });
-    }
-    this.pos += length;
   }
 }
 
-const SEVEN_ZIP_IDS = {
-  kEnd: 0x00,
-  kHeader: 0x01,
-  kArchiveProperties: 0x02,
-  kAdditionalStreamsInfo: 0x03,
-  kMainStreamsInfo: 0x04,
-  kFilesInfo: 0x05,
-  kPackInfo: 0x06,
-  kUnpackInfo: 0x07,
-  kSubStreamsInfo: 0x08,
-  kSize: 0x09,
-  kCRC: 0x0A,
-  kFolder: 0x0B,
-  kCodersUnpackSize: 0x0C,
-  kNumUnpackStream: 0x0D,
-  kEmptyStream: 0x0E,
-  kEmptyFile: 0x0F,
-  kAnti: 0x10,
-  kName: 0x11,
-  kCTime: 0x12,
-  kATime: 0x13,
-  kMTime: 0x14,
-  kWinAttributes: 0x15,
-  kComment: 0x16,
-  kEncodedHeader: 0x17,
-};
+function sz_skipPropertyBlock(reader) {
+  while (true) {
+    const id = sz_readByte(reader);
+    if (id === 0x00) break;
+    const size = sz_readNumber(reader);
+    sz_skip(reader, size);
+  }
+}
+
+// Skip SubStreamsInfo (0x08). Requires folder info from UnpackInfo.
+// Format: kNumUnPackStream? (0x0D), kSize? (0x09), kCRC? (0x0A), kEnd (0x00)
+function sz_skipSubStreamsInfo(reader, numFolders, folders) {
+  let numSubStreams = new Array(numFolders).fill(1); // default 1 per folder
+  let totalSubStreams = numFolders;
+  while (true) {
+    const id = sz_readByte(reader);
+    if (id === 0x00) break; // kEnd
+    if (id === 0x0D) { // kNumUnPackStream
+      totalSubStreams = 0;
+      for (let i = 0; i < numFolders; i++) {
+        numSubStreams[i] = sz_readNumber(reader);
+        totalSubStreams += numSubStreams[i];
+      }
+    } else if (id === 0x09) { // kSize
+      for (let i = 0; i < numFolders; i++) {
+        // Read (numSubStreams[i] - 1) sizes per folder; last size is implicit
+        for (let j = 0; j < numSubStreams[i] - 1; j++) sz_readNumber(reader);
+      }
+    } else if (id === 0x0A) { // kCRC
+      // Count streams that need CRC: those in folders with >1 sub-stream,
+      // or those without CRC defined in UnpackInfo
+      sz_skipBoolVector(reader, totalSubStreams, true);
+    } else {
+      // Unknown sub-block — try to skip by reading size
+      const size = sz_readNumber(reader);
+      sz_skip(reader, size);
+    }
+  }
+}
+
+// Detect nested archive files inside a 7z. Returns the type string or null.
+const NESTED_ARCHIVE_RE = /\.(rar|r\d{2,3}|zip|7z|iso)$/i;
+function sz_detectNestedArchive(filenames) {
+  for (const name of filenames) {
+    const match = NESTED_ARCHIVE_RE.exec(name);
+    if (match) return match[1].toLowerCase();
+  }
+  return null;
+}
+
+function sz_hasDiscStructure(filenames) {
+  for (const name of filenames) {
+    if (isDiscStructurePath(name)) return true;
+  }
+  return false;
+}
+
+// Check if any filename is a playable video (not inside Sample/Proof folders, not .iso).
+const SAMPLE_PROOF_FOLDER_RE = /[\\/](sample|proof)[\\/]/i;
+function sz_hasPlayableVideo(filenames) {
+  for (const name of filenames) {
+    if (!name) continue;
+    // Skip files inside Sample or Proof subdirectories
+    if (SAMPLE_PROOF_FOLDER_RE.test(name)) continue;
+    // Check if it's a video file extension
+    if (isVideoFileName(name)) return true;
+  }
+  return false;
+}
+
+function sz_parseFilesInfo(reader) {
+  const numFiles = sz_readNumber(reader);
+  if (numFiles < 0 || numFiles > 100000) throw new Error('bad-file-count');
+  const filenames = [];
+  while (true) {
+    const propType = sz_readByte(reader);
+    if (propType === 0x00) break; // kEnd
+    const size = sz_readNumber(reader);
+    if (propType === 0x11) { // kName
+      // First byte: 0 = inline, 1 = external
+      const external = sz_readByte(reader);
+      if (external !== 0) {
+        sz_skip(reader, size - 1);
+      } else {
+        // Names are stored as UTF-16LE NUL-terminated strings, concatenated
+        const namesData = sz_readBytes(reader, size - 1);
+        let start = 0;
+        for (let i = 0; i < numFiles; i++) {
+          // Find the double-NUL (0x00 0x00) terminator for UTF-16LE
+          let end = start;
+          while (end + 1 < namesData.length) {
+            if (namesData[end] === 0 && namesData[end + 1] === 0) break;
+            end += 2;
+          }
+          const nameSlice = namesData.subarray(start, end);
+          try {
+            filenames.push(nameSlice.swap16 ? Buffer.from(nameSlice).toString('utf16le') : new TextDecoder('utf-16le').decode(nameSlice));
+          } catch { filenames.push(''); }
+          start = end + 2; // skip past NUL terminator
+        }
+      }
+    } else {
+      sz_skip(reader, size);
+    }
+  }
+  return filenames;
+}
+
+function sz_skipBoolVector(reader, count, readCrcs) {
+  const allDefined = sz_readByte(reader);
+  let definedCount = count;
+  if (allDefined === 0) {
+    definedCount = 0;
+    let mask = 0;
+    let value = 0;
+    for (let i = 0; i < count; i++) {
+      if (mask === 0) { value = sz_readByte(reader); mask = 0x80; }
+      if (value & mask) definedCount++;
+      mask >>= 1;
+    }
+  }
+  if (readCrcs) {
+    for (let i = 0; i < definedCount; i++) sz_skip(reader, 4); // uint32 CRC
+  }
+  return definedCount;
+}
+
+// ---------------------------------------------------------------------------
+// Parse the mini StreamsInfo inside a kEncodedHeader (0x17) to extract
+// compression method, pack position/size, and unpack size.
+// ---------------------------------------------------------------------------
+function sz_parseEncodedHeaderInfo(reader) {
+  let packPos = 0;
+  let packSizes = [];
+  let coderMethod = null;
+  let coderProperties = null;
+  let unpackSize = 0;
+  let numFolders = 0;
+  const folderOutStreams = []; // track totalOut per folder for kCodersUnpackSize
+  const allCoders = []; // all coders for multi-coder chains (e.g. AES + LZMA)
+  const allUnpackSizes = []; // all unpack sizes (one per output stream)
+
+  while (true) {
+    const id = sz_readByte(reader);
+    if (id === 0x00) break; // kEnd
+    if (id === 0x06) { // kPackInfo
+      packPos = sz_readNumber(reader);
+      const numPackStreams = sz_readNumber(reader);
+      while (true) {
+        const subId = sz_readByte(reader);
+        if (subId === 0x00) break;
+        if (subId === 0x09) { // kSize
+          for (let i = 0; i < numPackStreams; i++) packSizes.push(sz_readNumber(reader));
+        } else if (subId === 0x0A) { // kCRC
+          sz_skipBoolVector(reader, numPackStreams, true);
+        } else {
+          const size = sz_readNumber(reader);
+          sz_skip(reader, size);
+        }
+      }
+    } else if (id === 0x07) { // kUnpackInfo
+      if (sz_readByte(reader) !== 0x0B) throw new Error('expected-kFolder');
+      numFolders = sz_readNumber(reader);
+      if (sz_readByte(reader) !== 0) throw new Error('external-folders-unsupported');
+      // Parse the single folder to get coder info
+      for (let fi = 0; fi < numFolders; fi++) {
+        const numCoders = sz_readNumber(reader);
+        let totalIn = 0, totalOut = 0;
+        for (let ci = 0; ci < numCoders; ci++) {
+          const mainByte = sz_readByte(reader);
+          const idSize = mainByte & 0x0F;
+          const isSimple = (mainByte & 0x10) === 0;
+          const hasAttributes = (mainByte & 0x20) !== 0;
+          const methodId = idSize > 0 ? sz_readBytes(reader, idSize) : Buffer.alloc(0);
+          if (fi === 0 && ci === 0) coderMethod = Buffer.from(methodId);
+          const inS = isSimple ? 1 : sz_readNumber(reader);
+          const outS = isSimple ? 1 : sz_readNumber(reader);
+          if (hasAttributes) {
+            const attrSize = sz_readNumber(reader);
+            const attrs = sz_readBytes(reader, attrSize);
+            if (fi === 0 && ci === 0) coderProperties = Buffer.from(attrs);
+            if (fi === 0) allCoders.push({ method: Buffer.from(methodId).toString('hex'), properties: Buffer.from(attrs) });
+          } else {
+            if (fi === 0) allCoders.push({ method: Buffer.from(methodId).toString('hex'), properties: null });
+          }
+          totalIn += inS;
+          totalOut += outS;
+        }
+        folderOutStreams.push(totalOut);
+        const numBindPairs = totalOut > 0 ? totalOut - 1 : 0;
+        for (let i = 0; i < numBindPairs; i++) { sz_readNumber(reader); sz_readNumber(reader); }
+        const numPacked = totalIn - numBindPairs;
+        if (numPacked > 1) { for (let i = 0; i < numPacked; i++) sz_readNumber(reader); }
+      }
+      // kCodersUnpackSize — read totalOutStreams sizes per folder
+      if (sz_readByte(reader) !== 0x0C) throw new Error('expected-kCodersUnpackSize');
+      for (let fi = 0; fi < numFolders; fi++) {
+        const numOut = folderOutStreams[fi] || 1;
+        for (let i = 0; i < numOut; i++) {
+          const s = sz_readNumber(reader);
+          if (fi === 0) {
+            allUnpackSizes.push(s);
+            if (i === 0) unpackSize = s;
+          }
+        }
+      }
+      // Skip remaining (CRC, kEnd)
+      while (true) {
+        const subId = sz_readByte(reader);
+        if (subId === 0x00) break;
+        if (subId === 0x0A) { sz_skipBoolVector(reader, numFolders, true); }
+        else { const size = sz_readNumber(reader); sz_skip(reader, size); }
+      }
+    } else if (id === 0x08) { // kSubStreamsInfo
+      sz_skipSubStreamsInfo(reader, numFolders, []);
+    } else {
+      throw new Error(`unknown-encoded-section-${id}`);
+    }
+  }
+
+  return {
+    packPos,
+    packSize: packSizes[0] || 0,
+    unpackSize,
+    coderMethod: coderMethod ? coderMethod.toString('hex') : null,
+    coderProperties: coderProperties || null,
+    coders: allCoders,
+    unpackSizes: allUnpackSizes,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// RAR5 PBKDF2-HMAC-SHA256 key derivation for encrypted headers.
+// Matches nzbdav's GenerateRarPbkdf2Key and GetRar5AesParams.
+// Returns array of 3 derived 32-byte values:
+//   [0] = AES key, [1] = extra data, [2] = password check material
+// ---------------------------------------------------------------------------
+function deriveRar5Key(password, salt, iterations) {
+  const hmac = crypto.createHmac('sha256', Buffer.from(password, 'utf8'));
+  let block = hmac.update(salt).digest();
+  const finalHash = Buffer.from(block);
+
+  const rounds = [iterations, 17, 17];
+  const results = [];
+
+  for (let x = 0; x < 3; x++) {
+    for (let i = 1; i < rounds[x]; i++) {
+      block = crypto.createHmac('sha256', Buffer.from(password, 'utf8')).update(block).digest();
+      for (let j = 0; j < finalHash.length; j++) {
+        finalHash[j] ^= block[j];
+      }
+    }
+    results.push(Buffer.from(finalHash));
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Decrypt RAR5 encrypted headers from the buffer.
+// After the Archive Encryption Header, each subsequent header is preceded by
+// a 16-byte AES IV. The encrypted header data is aligned to 16-byte blocks.
+// We decrypt one header at a time, reassembling the plaintext stream.
+// ---------------------------------------------------------------------------
+function decryptRar5Headers(buffer, startOffset, aesKey) {
+  const chunks = [];
+  let pos = startOffset;
+
+  // Each encrypted header block: [16-byte IV] [encrypted data aligned to 16 bytes]
+  // We decrypt, parse one header to find its actual size, collect it, then advance to next.
+  while (pos + 32 <= buffer.length) { // need at least IV(16) + one AES block(16)
+    const iv = buffer.subarray(pos, pos + 16);
+    pos += 16;
+
+
+    // Remaining encrypted data from this point
+    const remaining = buffer.length - pos;
+    if (remaining < 16) break;
+
+    // We don't know the exact encrypted block size, so decrypt all remaining
+    // aligned data and parse the header from the plaintext to find its size.
+    const alignedLen = remaining - (remaining % 16);
+    const encData = buffer.subarray(pos, pos + alignedLen);
+
+    let decrypted;
+    try {
+      const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, iv);
+      decipher.setAutoPadding(false);
+      decrypted = Buffer.concat([decipher.update(encData), decipher.final()]);
+    } catch (_) {
+      break;
+    }
+
+    // Parse actual header size from decrypted data
+    if (decrypted.length < 7) break;
+    let dPos = 4; // skip CRC
+
+    const sizeRes = readRar5Vint(decrypted, dPos);
+    if (!sizeRes || sizeRes.value === 0) break;
+    const headerSize = sizeRes.value;
+    dPos += sizeRes.bytes;
+
+    const typeRes = readRar5Vint(decrypted, dPos);
+    if (!typeRes) break;
+    const headerType = typeRes.value;
+    if (headerType < 1 || headerType > 5) break;
+
+    // The header block is: CRC(4) + sizeVint(sizeRes.bytes) + headerData(headerSize)
+    // Data area for service/file headers is NOT included in encrypted header blocks
+    // (data areas are separately encrypted with per-file IVs)
+    const headerBlockSize = 4 + sizeRes.bytes + headerSize;
+    if (headerBlockSize > decrypted.length) break;
+
+    chunks.push(decrypted.subarray(0, headerBlockSize));
+
+    // End of archive
+    if (headerType === 5) break;
+
+    // Advance pos in original buffer past the encrypted header data.
+    // The encrypted header size is headerBlockSize rounded up to 16 bytes.
+    const encBlockSize = headerBlockSize + ((16 - (headerBlockSize % 16)) % 16);
+    pos += encBlockSize;
+
+    // If this header has a data area (file content), it follows as a separate
+    // encrypted block: [IV(16)] [encrypted data]. We need to skip over it.
+    // Parse the header's flags and data size to determine how much to skip.
+    let hdrPos = 4 + sizeRes.bytes; // past CRC + headerSize vint
+    hdrPos += typeRes.bytes; // past type
+    const hdrFlagsRes = readRar5Vint(decrypted, hdrPos);
+    if (hdrFlagsRes) {
+      const hdrFlags = hdrFlagsRes.value;
+      hdrPos += hdrFlagsRes.bytes;
+      const hdrHasExtra = (hdrFlags & 0x0001) !== 0;
+      const hdrHasData = (hdrFlags & 0x0002) !== 0;
+      if (hdrHasExtra) {
+        const r = readRar5Vint(decrypted, hdrPos);
+        if (r) hdrPos += r.bytes;
+      }
+      if (hdrHasData) {
+        const r = readRar5Vint(decrypted, hdrPos);
+        if (r && r.value > 0) {
+          // Skip file data area between encrypted headers.
+          // File data is NOT header-encrypted (it's raw or per-file encrypted).
+          // Just skip dataSize bytes (no IV prefix, no padding needed for raw data).
+          const dataSize = r.value;
+          if (process.env.DEBUG_RAR5_DECRYPT) console.log(`[RAR5-DECRYPT] skip data: dataSize=${dataSize} newPos=${pos+dataSize} bufLen=${buffer.length}`);
+          pos += dataSize;
+        }
+      }
+    }
+  }
+
+  if (chunks.length === 0) return null;
+  return Buffer.concat(chunks);
+}
+
+// ---------------------------------------------------------------------------
+// RAR3 AES-128-CBC decryption for encrypted headers.
+// Key derivation: iterative SHA-1 over (password_utf16le + salt + counter)
+// for 262144 rounds, producing a 16-byte AES key and 16-byte IV.
+// ---------------------------------------------------------------------------
+function deriveRar3Key(password, salt) {
+  // Exact match of nzbdav's GetRar3AesParams / SharpCompress CryptKey3:
+  // 1. Password → wide chars (each UTF-8 byte becomes [byte, 0x00])
+  // 2. Salt appended to raw password bytes
+  // 3. Build one large buffer with all 262144 rounds concatenated
+  // 4. SHA-1 hash the full buffer; IV bytes captured at intervals
+  // 5. Key extracted from digest with byte-order rearrangement
+
+  const passwordBytes = Buffer.from(password, 'utf8');
+  const rawLength = 2 * password.length;
+  const rawPassword = Buffer.alloc(rawLength + 8);
+  for (let i = 0; i < password.length; i++) {
+    rawPassword[i * 2] = passwordBytes[i];
+    rawPassword[i * 2 + 1] = 0;
+  }
+  salt.copy(rawPassword, rawLength);
+
+  const numRounds = 1 << 18; // 262144
+  const blockSize = rawPassword.length + 3;
+  const ivBuf = Buffer.alloc(16, 0);
+
+  // Build the full data buffer: each round = rawPassword + 3-byte counter
+  const data = Buffer.alloc(blockSize * numRounds);
+  for (let i = 0; i < numRounds; i++) {
+    const offset = i * blockSize;
+    rawPassword.copy(data, offset);
+    data[offset + rawPassword.length] = i & 0xFF;
+    data[offset + rawPassword.length + 1] = (i >> 8) & 0xFF;
+    data[offset + rawPassword.length + 2] = (i >> 16) & 0xFF;
+
+    // Every (numRounds / 16) rounds, hash data[0..(i+1)*blockSize] for IV byte
+    if (i % (numRounds / 16) === 0) {
+      const digest = crypto.createHash('sha1').update(data.subarray(0, (i + 1) * blockSize)).digest();
+      ivBuf[i / (numRounds / 16)] = digest[19];
+    }
+  }
+
+  // Final hash of the full buffer
+  const digest = crypto.createHash('sha1').update(data).digest();
+
+  // Key extraction: big-endian to little-endian byte rearrangement within 4-byte groups
+  const key = Buffer.alloc(16);
+  for (let i = 0; i < 4; i++) {
+    for (let j = 0; j < 4; j++) {
+      key[i * 4 + j] = (
+        (
+          ((digest[i * 4] * 0x1000000) & 0xff000000)
+          | ((digest[i * 4 + 1] * 0x10000) & 0xff0000)
+          | ((digest[i * 4 + 2] * 0x100) & 0xff00)
+          | (digest[i * 4 + 3] & 0xff)
+        ) >>> (j * 8)
+      ) & 0xFF;
+    }
+  }
+
+  return { key, iv: ivBuf };
+}
+
+function decryptRar3Header(encryptedData, password, salt) {
+  const { key, iv } = deriveRar3Key(password, salt);
+  const decipher = crypto.createDecipheriv('aes-128-cbc', key, iv);
+  decipher.setAutoPadding(false);
+  return Buffer.concat([decipher.update(encryptedData), decipher.final()]);
+}
+
+// Parse decrypted RAR4 header data (after AES decryption of encrypted headers).
+// The decrypted data starts directly with header blocks (no RAR signature).
+function inspectRar4DecryptedHeaders(buffer, sampleEntries) {
+  let offset = 0;
+  let storedDetails = null;
+  let nestedArchiveCount = 0;
+  let playableEntryFound = false;
+
+  while (offset + 7 <= buffer.length) {
+    const headerType = buffer[offset + 2];
+    const headerFlags = buffer.readUInt16LE(offset + 3);
+    const headerSize = buffer.readUInt16LE(offset + 5);
+
+    if (headerType < 0x72 || headerType > 0x7B) break;
+    if (headerSize < 7) break;
+    if (offset + headerSize > buffer.length) break;
+
+    let addSize = 0;
+    if ((headerFlags & 0x8000) && headerType !== 0x74) {
+      if (offset + 7 + 4 <= buffer.length) {
+        addSize = buffer.readUInt32LE(offset + 7);
+      }
+    }
+
+    if (headerType === 0x74) {
+      let pos = offset + 7;
+      if (pos + 11 > buffer.length) break;
+
+      const packSize = buffer.readUInt32LE(pos);
+      addSize = packSize;
+      pos += 4; // pack size
+      pos += 4; // unpacked size
+      pos += 1; // host OS
+      pos += 4; // file CRC
+      pos += 4; // file time
+      if (pos >= buffer.length) break;
+      pos += 1; // extraction version
+      const methodByte = buffer[pos]; pos += 1;
+      if (pos + 2 > buffer.length) break;
+      const nameSize = buffer.readUInt16LE(pos); pos += 2;
+      pos += 4; // attributes
+      if (headerFlags & 0x0100) {
+        if (pos + 8 > buffer.length) break;
+        const highPackSize = buffer.readUInt32LE(pos);
+        addSize += highPackSize * 4294967296;
+        pos += 8;
+      }
+      if (pos + nameSize > buffer.length) break;
+      const name = buffer.slice(pos, pos + nameSize).toString('utf8').replace(/\0/g, '');
+      recordSampleEntry(sampleEntries, name);
+      if (isIsoFileName(name)) {
+        return { status: 'rar-iso-image', details: { name, sampleEntries, decrypted: true } };
+      }
+      const encrypted = Boolean(headerFlags & 0x0004);
+      const solid = Boolean(headerFlags & 0x0010);
+      if (encrypted && solid) {
+        return { status: 'rar-solid-encrypted', details: { name, sampleEntries, decrypted: true } };
+      }
+      if (methodByte !== 0x30) {
+        return { status: 'rar-compressed', details: { name, method: methodByte, sampleEntries, decrypted: true } };
+      }
+
+      if (!storedDetails) storedDetails = { name, method: methodByte };
+      if (isVideoFileName(name)) playableEntryFound = true;
+      else if (isArchiveEntryName(name)) nestedArchiveCount += 1;
+      if (isDiscStructurePath(name)) {
+        return { status: 'rar-disc-structure', details: { name, sampleEntries, decrypted: true } };
+      }
+    }
+
+    offset += headerSize + addSize;
+  }
+
+  if (storedDetails) {
+    if (nestedArchiveCount > 0 && !playableEntryFound) {
+      return { status: 'rar-nested-archive', details: { nestedEntries: nestedArchiveCount, sampleEntries, decrypted: true } };
+    }
+    if (!playableEntryFound && sampleEntries.length > 0) {
+      return { status: 'rar-no-video', details: { ...storedDetails, sampleEntries, decrypted: true } };
+    }
+    return { status: 'rar-stored', details: { ...storedDetails, sampleEntries, decrypted: true } };
+  }
+
+  return { status: 'rar-header-not-found', details: { reason: 'no-file-entries-after-decrypt' } };
+}
+
+// ---------------------------------------------------------------------------
+// 7z AES-256-SHA-256 decryption for encrypted encoded headers.
+// Implements the 7zAES key derivation (SHA-256 iterated over salt+password+counter)
+// and AES-256-CBC decryption.
+// ---------------------------------------------------------------------------
+function parse7zAESProperties(properties) {
+  if (!properties || properties.length === 0) return null;
+  const firstByte = properties[0];
+  const numCyclesPower = firstByte & 0x3F;
+
+  let pos = 1;
+  let saltSize = 0;
+  let ivSize = 0;
+
+  if (firstByte & 0xC0) {
+    if (pos >= properties.length) return null;
+    const secondByte = properties[pos++];
+    // py7zr-verified encoding: bit 7 = salt base, bit 6 = IV base
+    // secondByte high nibble added to salt, low nibble added to IV
+    saltSize = ((firstByte >> 7) & 1) + ((secondByte >> 4) & 0x0F);
+    ivSize = ((firstByte >> 6) & 1) + (secondByte & 0x0F);
+  }
+
+  const salt = saltSize > 0 ? Buffer.from(properties.subarray(pos, pos + saltSize)) : Buffer.alloc(0);
+  pos += saltSize;
+  const iv = Buffer.alloc(16, 0); // AES block size = 16
+  if (ivSize > 0) {
+    const ivBytes = Math.min(ivSize, 16);
+    properties.copy(iv, 0, pos, pos + ivBytes);
+  }
+
+  return { numCyclesPower, salt, iv };
+}
+
+function derive7zAESKey(password, salt, numCyclesPower) {
+  const passwordBuf = Buffer.from(password, 'utf16le');
+  const numRounds = 1 << numCyclesPower;
+  const hash = crypto.createHash('sha256');
+
+  // Batch iterations to reduce JS→C++ call overhead
+  const iterPrefix = Buffer.concat([salt, passwordBuf]);
+  const batchSize = Math.min(4096, numRounds);
+  const iterSize = iterPrefix.length + 8;
+  const batch = Buffer.alloc(batchSize * iterSize);
+
+  for (let start = 0; start < numRounds; start += batchSize) {
+    const end = Math.min(start + batchSize, numRounds);
+    let offset = 0;
+    for (let i = start; i < end; i++) {
+      iterPrefix.copy(batch, offset);
+      offset += iterPrefix.length;
+      batch.writeUInt32LE(i & 0xFFFFFFFF, offset);
+      batch.writeUInt32LE(Math.floor(i / 0x100000000), offset + 4);
+      offset += 8;
+    }
+    hash.update(batch.subarray(0, offset));
+  }
+
+  return hash.digest(); // 32 bytes = AES-256 key
+}
+
+function decrypt7zAES(encryptedData, password, aesProperties) {
+  const params = parse7zAESProperties(aesProperties);
+  if (!params) return null;
+
+  const key = derive7zAESKey(password, params.salt, params.numCyclesPower);
+
+  const decipher = crypto.createDecipheriv('aes-256-cbc', key, params.iv);
+  decipher.setAutoPadding(false);
+  return Buffer.concat([decipher.update(encryptedData), decipher.final()]);
+}
+
+// ---------------------------------------------------------------------------
+// Decompress the real header from the archive data using lzma-native.
+// The compressed header data sits RIGHT BEFORE the metadata footer in the
+// archive. Since both are at the end, both live in footerBuf.
+//   footerBuf layout: [...other data...][packed header data][metadata footer]
+// ---------------------------------------------------------------------------
+async function decompressEncodedHeader(info, footerBuf, metaSize) {
+  if (!info || !info.packSize || !info.unpackSize) return null;
+  if (!metaSize || metaSize <= 0) return null;
+
+  // Packed data ends where metadata starts (right before footerBuf's last metaSize bytes)
+  const packedEnd = footerBuf.length - metaSize;
+  const packedStart = packedEnd - info.packSize;
+  if (packedStart < 0 || packedEnd > footerBuf.length) return null;
+
+  const compressedData = footerBuf.subarray(packedStart, packedEnd);
+  return await decompressLzmaBuffer(info, compressedData);
+}
+
+// ---------------------------------------------------------------------------
+// Decrypt + decompress an AES-encrypted encoded header using a password.
+// Multi-coder pipeline: AES decrypt → LZMA decompress → raw header.
+// ---------------------------------------------------------------------------
+async function decryptEncodedHeader(info, footerBuf, metaSize, password) {
+  if (!info || !info.packSize || !password) return null;
+  if (!metaSize || metaSize <= 0) return null;
+
+  const packedEnd = footerBuf.length - metaSize;
+  const packedStart = packedEnd - info.packSize;
+  if (packedStart < 0 || packedEnd > footerBuf.length) return null;
+
+  const packedData = footerBuf.subarray(packedStart, packedEnd);
+  const coders = info.coders || [];
+  const unpackSizes = info.unpackSizes || [];
+
+  // Find the AES coder and the LZMA coder in the chain
+  const aesCoder = coders.find((c) => c.method.startsWith('06f107'));
+  const lzmaCoder = coders.find((c) => c.method === '030101' || c.method === '21');
+  if (!aesCoder) return null;
+
+  try {
+    // Step 1: AES decrypt the packed data
+    const decrypted = decrypt7zAES(packedData, password, aesCoder.properties);
+    if (!decrypted) return null;
+
+    // Step 2: If there's also a LZMA coder, decompress the decrypted data
+    if (lzmaCoder) {
+      const lzmaUnpackSize = unpackSizes[unpackSizes.length - 1] || info.unpackSize;
+      const lzmaInfo = {
+        coderMethod: lzmaCoder.method,
+        coderProperties: lzmaCoder.properties,
+        unpackSize: lzmaUnpackSize,
+      };
+      const trimSize = unpackSizes[0] || decrypted.length;
+      const lzmaInput = decrypted.subarray(0, trimSize);
+
+      const result = await decompressLzmaBuffer(lzmaInfo, lzmaInput);
+      if (result && Buffer.isBuffer(result) && result.length > 0) {
+        return result;
+      }
+    } else {
+      // No LZMA — trim AES padding and return
+      const trimSize = unpackSizes[0] || decrypted.length;
+      return decrypted.subarray(0, trimSize);
+    }
+  } catch (e) {
+    // AES decryption or LZMA decompression failed
+  }
+
+  return null;
+}
+
+function lzma2DictSize(byte) {
+  if (byte > 40) return 0xFFFFFFFF;
+  if (byte === 40) return 0xFFFFFFFF;
+  const base = (2 | (byte & 1)) << ((byte >> 1) + 11);
+  return base;
+}
+
+async function decompressLzmaBuffer(info, compressedData) {
+  const methodHex = info.coderMethod;
+  // 0x21 = LZMA2, 0x030101 = LZMA1
+  if (methodHex === '21') {
+    // LZMA2: use .xz-style rawDecoder
+    const dictByte = info.coderProperties?.[0] ?? 24;
+    return new Promise((resolve, reject) => {
+      const decompressor = lzma.createStream('rawDecoder', {
+        filters: [{ id: lzma.FILTER_LZMA2, options: { dictSize: lzma2DictSize(dictByte) } }],
+      });
+      const chunks = [];
+      decompressor.on('data', (chunk) => chunks.push(chunk));
+      decompressor.on('end', () => resolve(Buffer.concat(chunks)));
+      decompressor.on('error', (err) => reject(err));
+      decompressor.end(compressedData);
+    });
+  } else if (methodHex === '030101') {
+    // LZMA1: wrap as .lzma format (5 prop bytes + 8 byte uncompressed size LE + data)
+    const props = info.coderProperties;
+    if (!props || props.length < 5) return null;
+    const dictSize = Buffer.from(props).readUInt32LE(1);
+    const lzmaHeader = Buffer.alloc(13);
+    lzmaHeader[0] = props[0]; // LZMA properties byte
+    lzmaHeader.writeUInt32LE(dictSize, 1);
+    const sizeBuf = Buffer.alloc(8);
+    sizeBuf.writeBigUInt64LE(BigInt(info.unpackSize));
+    sizeBuf.copy(lzmaHeader, 5);
+    const lzmaStream = Buffer.concat([lzmaHeader, compressedData]);
+    return new Promise((resolve, reject) => {
+      lzma.decompress(lzmaStream, {}, (result) => {
+        if (Buffer.isBuffer(result)) resolve(result);
+        else reject(new Error('lzma-decompress-non-buffer'));
+      }, (err) => reject(err instanceof Error ? err : new Error(String(err))));
+    });
+  } else if (methodHex === '00' || !methodHex) {
+    return compressedData;
+  }
+  return null;
+}
+
+// --- 7z reader primitives ---
+function sz_readByte(reader) {
+  if (reader.pos >= reader.buf.length) throw new Error('7z-eof');
+  return reader.buf[reader.pos++];
+}
+function sz_readBytes(reader, n) {
+  if (reader.pos + n > reader.buf.length) throw new Error('7z-eof');
+  const slice = reader.buf.subarray(reader.pos, reader.pos + n);
+  reader.pos += n;
+  return slice;
+}
+function sz_skip(reader, n) {
+  if (reader.pos + n > reader.buf.length) throw new Error('7z-eof');
+  reader.pos += n;
+}
+// 7z variable-length integer: count leading ONE bits in first byte to
+// determine how many extra bytes follow (matching the 7zip C reference).
+function sz_readNumber(reader) {
+  const b = sz_readByte(reader);
+  // 0xxxxxxx: single byte, value 0-127
+  if ((b & 0x80) === 0) return b;
+
+  // At least one extra byte
+  let value = BigInt(sz_readByte(reader));
+
+  for (let i = 1; i < 8; i++) {
+    const mask = 0x80 >>> i;
+    if ((b & mask) === 0) {
+      // Remaining value bits from first byte go to the highest position
+      const high = BigInt(b & (mask - 1));
+      value |= (high << BigInt(i * 8));
+      return Number(value);
+    }
+    // Read next byte in little-endian order
+    value |= (BigInt(sz_readByte(reader)) << BigInt(i * 8));
+  }
+  // 0xFF: 8 extra bytes already read
+  return Number(value);
+}
+
 
 function statSegment(pool, segmentId) {
   if (currentMetrics) currentMetrics.statCalls += 1;

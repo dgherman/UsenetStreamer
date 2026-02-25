@@ -5,7 +5,9 @@ const { getRandomUserAgent } = require('../../utils/userAgent');
 const DEFAULT_TIME_BUDGET_MS = 40000;
 const DEFAULT_MAX_CANDIDATES = 25;
 const DEFAULT_DOWNLOAD_CONCURRENCY = 8;
-const DEFAULT_DOWNLOAD_TIMEOUT_MS = 15000;
+const DEFAULT_DOWNLOAD_TIMEOUT_MS = 10000;
+const LARGE_NZB_DOWNLOAD_TIMEOUT_MS = 15000;
+const LARGE_NZB_SIZE_THRESHOLD = 30 * 1024 * 1024 * 1024; // 30 GB
 const TIMEOUT_ERROR_CODE = 'TRIAGE_TIMEOUT';
 
 function normalizeTitle(title) {
@@ -116,6 +118,17 @@ function summarizeDecision(decision) {
   const warnings = Array.isArray(decision?.warnings) ? decision.warnings : [];
   const archiveFindings = Array.isArray(decision?.archiveFindings) ? decision.archiveFindings : [];
 
+  // Check if any 7z finding is present, and whether a verified 7z (sevenzip-stored) was found
+  const hasSevenZipFinding = archiveFindings.some((finding) => {
+    const label = String(finding?.status || '').toLowerCase();
+    return label.startsWith('sevenzip');
+  }) || warnings.some((warning) => String(warning || '').toLowerCase().startsWith('sevenzip'));
+
+  const hasSevenZipStored = archiveFindings.some((finding) => {
+    const label = String(finding?.status || '').toLowerCase();
+    return label === 'sevenzip-stored';
+  });
+
   let status = 'blocked';
   if (decision?.decision === 'accept' && blockers.length === 0) {
     const positiveFinding = archiveFindings.some((finding) => {
@@ -124,20 +137,21 @@ function summarizeDecision(decision) {
     });
     if (positiveFinding) {
       status = 'verified';
+    } else if (hasSevenZipFinding) {
+      status = 'unverified_7z';
     } else {
       status = 'unverified';
     }
   }
 
-  // Flag unverified outcomes that are 7z-only so downstream caching can treat them as complete
-  if (status === 'unverified') {
-    const sevenZipFlag = archiveFindings.some((finding) => {
-      const label = String(finding?.status || '').toLowerCase();
-      return label.startsWith('sevenzip');
-    }) || warnings.some((warning) => String(warning || '').toLowerCase().startsWith('sevenzip'));
-    if (sevenZipFlag) {
-      status = 'unverified_7z';
-    }
+  // Downgrade verified to unverified_7z if 7z finding present but none were sevenzip-stored
+  if (status === 'verified' && hasSevenZipFinding && !hasSevenZipStored) {
+    status = 'unverified_7z';
+  }
+
+  // Flag other unverified outcomes that are 7z-only
+  if (status === 'unverified' && hasSevenZipFinding) {
+    status = 'unverified_7z';
   }
 
   return {
@@ -220,7 +234,12 @@ async function triageAndRank(nzbResults, options = {}) {
     1,
     Math.min(options.downloadConcurrency ?? DEFAULT_DOWNLOAD_CONCURRENCY, selectedCandidates.length),
   );
-  const downloadTimeoutMs = options.downloadTimeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS;
+  const baseDownloadTimeoutMs = options.downloadTimeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS;
+  // If any candidate is >30 GB, use the larger timeout for all downloads
+  const hasLargeCandidate = selectedCandidates.some((c) => (c.size || 0) > LARGE_NZB_SIZE_THRESHOLD);
+  const downloadTimeoutMs = hasLargeCandidate
+    ? Math.max(baseDownloadTimeoutMs, LARGE_NZB_DOWNLOAD_TIMEOUT_MS)
+    : baseDownloadTimeoutMs;
   const triageConfig = { ...triageOptions, reuseNntpPool: true };
   const serializedChains = new Map();
 
@@ -282,12 +301,7 @@ async function triageAndRank(nzbResults, options = {}) {
       }
 
       const downloadStart = Date.now();
-      logEvent(logger, 'info', 'NZB download:start', {
-        downloadUrl,
-        indexerId: candidate.indexerId,
-        indexerName: candidate.indexerName,
-        title: candidate.title,
-      });
+      // logEvent(logger, 'info', 'NZB download:start', { ... });
 
       let nzbPayload;
       try {
