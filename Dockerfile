@@ -4,9 +4,11 @@ FROM node:20-alpine
 # Set working directory inside container
 WORKDIR /usr/src/app
 
-# Install dependencies
+# Install dependencies (python3/make/g++/xz-dev needed to compile lzma-native)
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN apk add --no-cache python3 make g++ xz-dev && \
+    npm ci --omit=dev && \
+    apk del python3 make g++
 
 # Copy application code
 COPY . .
