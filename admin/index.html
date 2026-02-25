@@ -167,13 +167,23 @@
         <section class="group">
           <h3>Result Sorting &amp; Filters</h3>
           <div class="field-grid">
-            <label>Sorting Mode
-              <select name="NZB_SORT_MODE">
-                <option value="quality_then_size">Quality → Size</option>
-                <option value="language_quality_size">Preferred Language → Quality → Size</option>
-              </select>
-              <span class="field-hint">Choose how releases are prioritized before NZB health checks run.</span>
-            </label>
+            <div class="sort-order-builder wide-field" data-sort-order-builder>
+              <span class="field-label">Sorting Priority (optional)</span>
+              <input type="hidden" name="NZB_SORT_ORDER" data-sort-order-hidden />
+              <div class="sort-order-grid">
+                <label class="checkbox"><input type="checkbox" value="language" data-sort-order-option /> <span>Language</span> <span class="sort-order-index" data-sort-order-index></span></label>
+                <label class="checkbox"><input type="checkbox" value="release_group" data-sort-order-option /> <span>Release Group</span> <span class="sort-order-index" data-sort-order-index></span></label>
+                <label class="checkbox"><input type="checkbox" value="size" data-sort-order-option /> <span>Size</span> <span class="sort-order-index" data-sort-order-index></span></label>
+                <label class="checkbox"><input type="checkbox" value="resolution" data-sort-order-option /> <span>Resolution</span> <span class="sort-order-index" data-sort-order-index></span></label>
+                <label class="checkbox"><input type="checkbox" value="quality" data-sort-order-option /> <span>Quality</span> <span class="sort-order-index" data-sort-order-index></span></label>
+                <label class="checkbox"><input type="checkbox" value="encode" data-sort-order-option /> <span>Encode</span> <span class="sort-order-index" data-sort-order-index></span></label>
+                <label class="checkbox"><input type="checkbox" value="visual_tag" data-sort-order-option /> <span>Visual Tag</span> <span class="sort-order-index" data-sort-order-index></span></label>
+                <label class="checkbox"><input type="checkbox" value="audio_tag" data-sort-order-option /> <span>Audio Tag</span> <span class="sort-order-index" data-sort-order-index></span></label>
+                <label class="checkbox"><input type="checkbox" value="keyword" data-sort-order-option /> <span>Keyword</span> <span class="sort-order-index" data-sort-order-index></span></label>
+              </div>
+              <span class="field-hint">Check the criteria you care about in priority order — lower numbers win. Only checked criteria are active; ties fall through to the next. Leave all unchecked to use the Sort Mode setting above instead. Criteria only have effect when the corresponding "Release Preferences" field below is filled in (except <strong>resolution</strong> and <strong>size</strong>, which always apply).</span>
+              <span class="field-hint" data-sort-order-current></span>
+            </div>
             <div class="language-multiselect wide-field" data-language-selector>
               <span class="field-label">Preferred Languages</span>
               <input type="hidden" name="NZB_PREFERRED_LANGUAGE" data-language-hidden />
@@ -308,6 +318,38 @@
               <span class="field-hint">Applies evenly to every enabled resolution. Leave blank or set 0 for no cap.</span>
             </label>
           </div>
+          <div class="advanced-filters">
+            <div class="advanced-filters-header">
+              <span>Release Preferences (Optional)</span>
+              <span class="field-hint">Define what "preferred" means for each Sorting Priority criterion above. Values are comma-separated and case-insensitive; earlier entries win. Only takes effect when the matching criterion is checked in Sorting Priority.</span>
+            </div>
+            <div class="field-grid">
+              <label>Preferred Quality Source
+                <input name="NZB_PREFERRED_QUALITIES" type="text" placeholder="remux,bluray,web-dl,webrip" />
+                <span class="field-hint">Source/release type in preference order. e.g. <code>remux,bluray,web-dl,webrip</code>. Used when <strong>Quality</strong> is checked above.</span>
+              </label>
+              <label>Preferred Encodes
+                <input name="NZB_PREFERRED_ENCODES" type="text" placeholder="x265,hevc,x264,avc" />
+                <span class="field-hint">Video codec in preference order. e.g. <code>x265,hevc,x264,avc</code>. Used when <strong>Encode</strong> is checked above.</span>
+              </label>
+              <label>Preferred Release Groups
+                <input name="NZB_PREFERRED_RELEASE_GROUPS" type="text" placeholder="e.g. CtrlHD,FraMeSToR,FLUX" />
+                <span class="field-hint">Exact release group names in preference order. Used when <strong>Release Group</strong> is checked above.</span>
+              </label>
+              <label>Preferred Visual Tags
+                <input name="NZB_PREFERRED_VISUAL_TAGS" type="text" placeholder="dv,hdr10+,hdr10,hdr" />
+                <span class="field-hint">HDR/colour format tags in preference order. e.g. <code>dv,hdr10+,hdr10,hdr</code>. Used when <strong>Visual Tag</strong> is checked above.</span>
+              </label>
+              <label>Preferred Audio Tags
+                <input name="NZB_PREFERRED_AUDIO_TAGS" type="text" placeholder="atmos,truehd,dts-x,dts-hd" />
+                <span class="field-hint">Audio format tags in preference order. e.g. <code>atmos,truehd,dts-x,dts-hd,dts,dd+</code>. Used when <strong>Audio Tag</strong> is checked above.</span>
+              </label>
+              <label class="wide-field">Preferred Keywords
+                <input name="NZB_PREFERRED_KEYWORDS" type="text" placeholder="e.g. extended,proper,repack" />
+                <span class="field-hint">Freeform title keywords in preference order. A result whose title contains an earlier keyword ranks higher. e.g. <code>proper,repack</code> to prefer fixed releases. Used when <strong>Keyword</strong> is checked above.</span>
+              </label>
+            </div>
+          </div>
         </section>
 
         <section class="group" id="nzbdavGroup">
@@ -337,6 +379,10 @@
             <label>Series Category
               <input name="NZBDAV_CATEGORY_SERIES" type="text" placeholder="Tv" />
             </label>
+            <label>Completed Catalog Items
+              <input name="NZBDAV_HISTORY_CATALOG_LIMIT" type="number" min="0" max="200" placeholder="100" />
+              <span class="field-hint">Show last completed NZBs in the catalog (0 = off).</span>
+            </label>
           </div>
           <div class="inline-actions">
             <button type="button" class="secondary" data-test="nzbdav">Test Connection</button>
@@ -345,7 +391,11 @@
         </section>
 
         <section class="group">
-          <h3>NZB Health Check (highly recommended)</h3>
+          <h3>NZB Health and Archive Check (highly recommended)</h3>
+          <div class="health-check-notes">
+            <p class="field-hint"><strong>Health check:</strong> Lightweight verification that the required articles are available.</p>
+            <p class="field-hint"><strong>Archive check:</strong> Blocks NZBs that look complete but only contain samples, nested archives, or no playable video.</p>
+          </div>
           <div class="legend-card inset">
             <h4 class="compact">Stream Status Legend</h4>
             <ul class="legend-list">

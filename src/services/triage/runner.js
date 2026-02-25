@@ -116,6 +116,28 @@ function summarizeDecision(decision) {
   const warnings = Array.isArray(decision?.warnings) ? decision.warnings : [];
   const archiveFindings = Array.isArray(decision?.archiveFindings) ? decision.archiveFindings : [];
 
+  const hasAssumedStoredWithoutParsedEntries = archiveFindings.some((finding) => {
+    const label = String(finding?.status || '').toLowerCase();
+    if (label !== 'rar-stored') return false;
+    const note = String(finding?.details?.note || '').toLowerCase();
+    if (note !== 'rar5-header-assumed-stored') return false;
+    const hasName = Boolean(finding?.details?.name);
+    const hasSamples = Array.isArray(finding?.details?.sampleEntries)
+      && finding.details.sampleEntries.some((entry) => Boolean(entry));
+    return !hasName && !hasSamples;
+  });
+
+  // Check if we have a 7z that couldn't be verified (untested compression)
+  const hasSevenZipUntested = archiveFindings.some((finding) => {
+    const label = String(finding?.status || '').toLowerCase();
+    return label.startsWith('sevenzip');
+  }) || warnings.some((warning) => String(warning || '').toLowerCase().startsWith('sevenzip'));
+
+  const hasSevenZipStored = archiveFindings.some((finding) => {
+    const label = String(finding?.status || '').toLowerCase();
+    return label === 'sevenzip-stored';
+  });
+
   let status = 'blocked';
   if (decision?.decision === 'accept' && blockers.length === 0) {
     const positiveFinding = archiveFindings.some((finding) => {
@@ -124,20 +146,23 @@ function summarizeDecision(decision) {
     });
     if (positiveFinding) {
       status = 'verified';
+    } else if (hasSevenZipUntested) {
+      status = 'unverified_7z';
+    } else if (hasAssumedStoredWithoutParsedEntries) {
+      status = 'blocked';
     } else {
       status = 'unverified';
     }
   }
 
-  // Flag unverified outcomes that are 7z-only so downstream caching can treat them as complete
-  if (status === 'unverified') {
-    const sevenZipFlag = archiveFindings.some((finding) => {
-      const label = String(finding?.status || '').toLowerCase();
-      return label.startsWith('sevenzip');
-    }) || warnings.some((warning) => String(warning || '').toLowerCase().startsWith('sevenzip'));
-    if (sevenZipFlag) {
-      status = 'unverified_7z';
-    }
+  // Downgrade verified to unverified_7z if 7z finding present but none were sevenzip-stored
+  if (status === 'verified' && hasSevenZipUntested && !hasSevenZipStored) {
+    status = 'unverified_7z';
+  }
+
+  // Flag other unverified outcomes that are 7z-only
+  if (status === 'unverified' && hasSevenZipUntested) {
+    status = 'unverified_7z';
   }
 
   return {
