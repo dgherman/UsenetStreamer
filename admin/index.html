@@ -181,7 +181,7 @@
                 <label class="checkbox"><input type="checkbox" value="audio_tag" data-sort-order-option /> <span>Audio Tag</span> <span class="sort-order-index" data-sort-order-index></span></label>
                 <label class="checkbox"><input type="checkbox" value="keyword" data-sort-order-option /> <span>Keyword</span> <span class="sort-order-index" data-sort-order-index></span></label>
               </div>
-              <span class="field-hint">Select keys in your preferred order. First selected key has highest priority.</span>
+              <span class="field-hint">Check the criteria you care about in priority order — lower numbers win. Only checked criteria are active; ties fall through to the next. Leave all unchecked to use the Sort Mode setting above instead. Criteria only have effect when the corresponding "Release Preferences" field below is filled in (except <strong>resolution</strong> and <strong>size</strong>, which always apply).</span>
               <span class="field-hint" data-sort-order-current></span>
             </div>
             <div class="language-multiselect wide-field" data-language-selector>
@@ -321,28 +321,32 @@
           <div class="advanced-filters">
             <div class="advanced-filters-header">
               <span>Release Preferences (Optional)</span>
-              <span class="field-hint">These preferences are used by Sorting Priority when the matching key is present.</span>
+              <span class="field-hint">Define what "preferred" means for each Sorting Priority criterion above. Values are comma-separated and case-insensitive; earlier entries win. Only takes effect when the matching criterion is checked in Sorting Priority.</span>
             </div>
             <div class="field-grid">
-              <label>Preferred Quality Source (optional)
-                <input name="NZB_PREFERRED_QUALITIES" type="text" placeholder="e.g. remux,bluray,web-dl" />
-                <span class="field-hint">Quality here means source/release type (e.g. REMUX, BluRay, WEB-DL), not resolution.</span>
+              <label>Preferred Quality Source
+                <input name="NZB_PREFERRED_QUALITIES" type="text" placeholder="remux,bluray,web-dl,webrip" />
+                <span class="field-hint">Source/release type in preference order. e.g. <code>remux,bluray,web-dl,webrip</code>. Used when <strong>Quality</strong> is checked above.</span>
               </label>
-              <label>Preferred Encodes (optional)
-                <input name="NZB_PREFERRED_ENCODES" type="text" placeholder="e.g. hevc,avc,x265,x264" />
+              <label>Preferred Encodes
+                <input name="NZB_PREFERRED_ENCODES" type="text" placeholder="x265,hevc,x264,avc" />
+                <span class="field-hint">Video codec in preference order. e.g. <code>x265,hevc,x264,avc</code>. Used when <strong>Encode</strong> is checked above.</span>
               </label>
-              <label>Preferred Release Groups (optional)
-                <input name="NZB_PREFERRED_RELEASE_GROUPS" type="text" placeholder="e.g. CtrlHD,FraMeSToR" />
+              <label>Preferred Release Groups
+                <input name="NZB_PREFERRED_RELEASE_GROUPS" type="text" placeholder="e.g. CtrlHD,FraMeSToR,FLUX" />
+                <span class="field-hint">Exact release group names in preference order. Used when <strong>Release Group</strong> is checked above.</span>
               </label>
-              <label>Preferred Visual Tags (optional)
-                <input name="NZB_PREFERRED_VISUAL_TAGS" type="text" placeholder="e.g. dv,hdr10+,hdr" />
+              <label>Preferred Visual Tags
+                <input name="NZB_PREFERRED_VISUAL_TAGS" type="text" placeholder="dv,hdr10+,hdr10,hdr" />
+                <span class="field-hint">HDR/colour format tags in preference order. e.g. <code>dv,hdr10+,hdr10,hdr</code>. Used when <strong>Visual Tag</strong> is checked above.</span>
               </label>
-              <label>Preferred Audio Tags (optional)
-                <input name="NZB_PREFERRED_AUDIO_TAGS" type="text" placeholder="e.g. atmos,truehd,dts" />
+              <label>Preferred Audio Tags
+                <input name="NZB_PREFERRED_AUDIO_TAGS" type="text" placeholder="atmos,truehd,dts-x,dts-hd" />
+                <span class="field-hint">Audio format tags in preference order. e.g. <code>atmos,truehd,dts-x,dts-hd,dts,dd+</code>. Used when <strong>Audio Tag</strong> is checked above.</span>
               </label>
-              <label class="wide-field">Preferred Keywords (optional)
-                <input name="NZB_PREFERRED_KEYWORDS" type="text" placeholder="e.g. criterion,extended,proper" />
-                <span class="field-hint">Comma-separated title keywords used in custom sorting only.</span>
+              <label class="wide-field">Preferred Keywords
+                <input name="NZB_PREFERRED_KEYWORDS" type="text" placeholder="e.g. extended,proper,repack" />
+                <span class="field-hint">Freeform title keywords in preference order. A result whose title contains an earlier keyword ranks higher. e.g. <code>proper,repack</code> to prefer fixed releases. Used when <strong>Keyword</strong> is checked above.</span>
               </label>
             </div>
           </div>
