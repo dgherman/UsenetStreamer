@@ -1401,7 +1401,6 @@ async function streamHandler(req, res) {
           if (historyMatch) {
             stats.trackInstantHit();
             console.log(`[INSTANT CACHE] Found cached entry, skipping indexer search: ${instantEntry.jobName}`);
-            console.log(`[INSTANT CACHE DEBUG] History has ${historyCheck.size} items for category: ${categoryForInstant}`);
             const tokenSegment = ADDON_SHARED_SECRET ? `/${ADDON_SHARED_SECRET}` : '';
             const addonBaseUrl = ADDON_BASE_URL.replace(/\/$/, '');
 
@@ -3664,10 +3663,6 @@ async function streamHandler(req, res) {
           });
         });
 
-        console.log('[PREFETCH DEBUG] Storing prefetch entry', {
-          downloadUrl: String(prefetchCandidate.downloadUrl || '').slice(0, 80),
-          title: String(prefetchCandidate.title || '').slice(0, 60),
-        });
         prefetchedNzbdavJobs.set(prefetchCandidate.downloadUrl, { promise: jobPromise, createdAt: Date.now() });
         stats.trackPrefetchStarted();
         prefetchedCount++;
@@ -3676,11 +3671,6 @@ async function streamHandler(req, res) {
         ((candidate) => {
           jobPromise
             .then((jobInfo) => {
-              console.log('[PREFETCH DEBUG] Prefetch completed', {
-                downloadUrl: String(candidate.downloadUrl || '').slice(0, 80),
-                nzoId: jobInfo.nzoId,
-                jobName: String(jobInfo.jobName || '').slice(0, 60),
-              });
               prefetchedNzbdavJobs.set(candidate.downloadUrl, jobInfo);
               if (jobInfo.nzoId) prefetchNzoIdIndex.set(jobInfo.nzoId, candidate.downloadUrl);
               // Also track in in-flight downloads so findMatchingQueueJob can find it
@@ -3816,15 +3806,6 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
     const cacheKeyIdentifier = downloadUrl || `history:${historyNzoId}`;
     const cacheKey = nzbdavService.buildNzbdavCacheKey(cacheKeyIdentifier, category, requestedEpisode);
 
-    // DEBUG: Log stream request details
-    console.log('[STREAM DEBUG] Request received', {
-      downloadUrl: String(downloadUrl || '').slice(0, 80),
-      title: String(title || '').slice(0, 60),
-      cacheKey: String(cacheKey || '').slice(0, 100),
-      historyNzoId: historyNzoId || undefined,
-      historyJobName: String(req.query.historyJobName || '').slice(0, 60),
-    });
-
     let existingSlotHint = req.query.historyNzoId
       ? {
           nzoId: req.query.historyNzoId,
@@ -3838,10 +3819,6 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
       prefetchedSlotHint = await resolvePrefetchedNzbdavJob(downloadUrl);
       if (prefetchedSlotHint?.nzoId) {
         stats.trackPrefetchHit();
-        console.log('[STREAM DEBUG] Using prefetched slot', {
-          nzoId: prefetchedSlotHint.nzoId,
-          jobName: String(prefetchedSlotHint.jobName || '').slice(0, 60),
-        });
         existingSlotHint = {
           nzoId: prefetchedSlotHint.nzoId,
           jobName: prefetchedSlotHint.jobName,
