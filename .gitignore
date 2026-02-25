@@ -55,3 +55,6 @@ test_nzbs/
 scripts/
 
 scripts\testTriage.js
+
+# Git worktrees
+.worktrees/
