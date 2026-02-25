@@ -977,6 +977,7 @@ function rebuildRuntimeConfig({ log = true } = {}) {
       indexerManager: INDEXER_MANAGER,
       newznabEnabled: NEWZNAB_ENABLED,
       triageEnabled: TRIAGE_ENABLED,
+      prefetchCount: TRIAGE_PREFETCH_COUNT,
       allowedResolutions: ALLOWED_RESOLUTIONS,
       resolutionLimitPerQuality: RESOLUTION_LIMIT_PER_QUALITY,
     });
@@ -2871,6 +2872,7 @@ async function streamHandler(req, res) {
       });
 
       // Language-aware multi-prefetch: prefer candidates matching user's preferred language
+      console.log(`[PREFETCH] Triage complete: ${verifiedCandidates.length} verified candidate(s), NZB_PREFETCH_COUNT=${TRIAGE_PREFETCH_COUNT}`);
       if (prefetchCandidates.length === 0 && verifiedCandidates.length > 0) {
         // Sort candidates: language matches first, then others
         const sortedCandidates = [...verifiedCandidates].sort((a, b) => {
@@ -2915,6 +2917,7 @@ async function streamHandler(req, res) {
           }
         }
 
+        console.log(`[PREFETCH] Triage in progress: ${earlyVerifiedCandidates.length} early verified candidate(s), NZB_PREFETCH_COUNT=${TRIAGE_PREFETCH_COUNT}`);
         if (earlyVerifiedCandidates.length > 0) {
           // Sort by language preference
           const sortedCandidates = [...earlyVerifiedCandidates].sort((a, b) => {
