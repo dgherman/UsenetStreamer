@@ -6,7 +6,7 @@ const nzbdavStreamCache = new Map();
 const failedDownloadUrlCache = new Map();
 
 // Parse cache configuration from environment
-let NZBDAV_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+let NZBDAV_CACHE_TTL_MS = 72 * 60 * 60 * 1000;
 let NEGATIVE_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours default
 
 function reloadNzbdavCacheConfig() {
@@ -14,7 +14,7 @@ function reloadNzbdavCacheConfig() {
   if (Number.isFinite(raw) && raw >= 0) {
     NZBDAV_CACHE_TTL_MS = raw * 60 * 1000;
   } else {
-    NZBDAV_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+    NZBDAV_CACHE_TTL_MS = 72 * 60 * 60 * 1000;
   }
 
   // Negative cache TTL (hours) - how long to remember failed download URLs
