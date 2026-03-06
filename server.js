@@ -3961,14 +3961,18 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
       return;
     }
 
-    // On explicit nzbdav2 failure, try fallback candidates before giving up
+    // On explicit nzbdav2 failure (including NO_VIDEO_FILES), try fallback then failure video
     if (error?.isNzbdavFailure) {
       console.warn('[NZBDAV] Stream failure detected:', error.failureMessage || error.message);
-      cache.markDownloadUrlFailed(downloadUrl, error.failureMessage || error.message, 'nzbdav_failure');
+      const failureReason = error.code === 'NO_VIDEO_FILES' ? 'no_video_files' : 'nzbdav_failure';
+      cache.markDownloadUrlFailed(downloadUrl, error.failureMessage || error.message, failureReason);
       const triedFallback = await tryNextFallback(downloadUrl, error);
       if (triedFallback !== false) return; // Fallback handled the response
 
-      const served = await nzbdavService.streamFailureVideo(req, res, error);
+      // Serve the appropriate failure video based on error type
+      const served = error.code === 'NO_VIDEO_FILES'
+        ? await nzbdavService.streamVideoTypeFailure(req, res, error)
+        : await nzbdavService.streamFailureVideo(req, res, error);
       if (!served && !res.headersSent) {
         res.status(502).json({ error: error.failureMessage || error.message });
       } else if (!served) {
@@ -3977,24 +3981,7 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
       return;
     }
 
-    // On NO_VIDEO_FILES, try fallback candidates before giving up
-    if (error?.code === 'NO_VIDEO_FILES') {
-      console.warn('[NZBDAV] Stream failure due to missing playable files');
-      cache.markDownloadUrlFailed(downloadUrl, 'No playable video files', 'no_video_files');
-      const triedFallback = await tryNextFallback(downloadUrl, error);
-      if (triedFallback !== false) return; // Fallback handled the response
-
-      const served = await nzbdavService.streamVideoTypeFailure(req, res, error);
-      if (!served && !res.headersSent) {
-        res.status(502).json({ error: error.message });
-      } else if (!served) {
-        res.end();
-      }
-      return;
-    }
-
     const statusCode = error.response?.status || 502;
-    // console.error('[NZBDAV] Stream proxy error:', error.message);
     if (!res.headersSent) {
       res.status(statusCode).json({ error: error.message });
     } else {
