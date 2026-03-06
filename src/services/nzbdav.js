@@ -831,7 +831,7 @@ async function streamFileResponse(req, res, absolutePath, emulateHead, logPrefix
   try {
     await pipelineAsync(readStream, res);
   } catch (error) {
-    if (error?.code === 'ERR_STREAM_PREMATURE_CLOSE') {
+    if (error?.code === 'ERR_STREAM_PREMATURE_CLOSE' || error?.code === 'ERR_STREAM_UNABLE_TO_PIPE') {
       console.warn(`[${logPrefix}] Stream closed early for ${absolutePath}: ${error.message}`);
       return true;
     }
@@ -843,6 +843,11 @@ async function streamFileResponse(req, res, absolutePath, emulateHead, logPrefix
 }
 
 async function streamFailureVideo(req, res, failureError) {
+  if (res.destroyed || res.writableEnded) {
+    console.warn('[FAILURE STREAM] Response already closed, skipping failure video');
+    return false;
+  }
+
   const stats = await safeStat(FAILURE_VIDEO_PATH);
   if (!stats || !stats.isFile()) {
     console.error(`[FAILURE STREAM] Failure video not found at ${FAILURE_VIDEO_PATH}`);
@@ -861,6 +866,11 @@ async function streamFailureVideo(req, res, failureError) {
 }
 
 async function streamVideoTypeFailure(req, res, failureError) {
+  if (res.destroyed || res.writableEnded) {
+    console.warn('[NO VIDEO STREAM] Response already closed, skipping failure video');
+    return false;
+  }
+
   const stats = await safeStat(VIDEO_TYPE_FAILURE_PATH);
   if (!stats || !stats.isFile()) {
     console.error(`[NO VIDEO STREAM] Failure video not found at ${VIDEO_TYPE_FAILURE_PATH}`);
@@ -1067,11 +1077,10 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
   try {
     await pipelineAsync(nzbdavResponse.data, res);
   } catch (error) {
-    if (error?.code === 'ERR_STREAM_PREMATURE_CLOSE') {
+    if (error?.code === 'ERR_STREAM_PREMATURE_CLOSE' || error?.code === 'ERR_STREAM_UNABLE_TO_PIPE') {
       console.warn('[NZBDAV] Stream closed early by client');
       return;
     }
-    // console.error('[NZBDAV] Error while piping stream:', error.message);
     throw error;
   }
 }
