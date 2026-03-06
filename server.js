@@ -1162,7 +1162,7 @@ const NZBDAV_CACHE_TTL_MINUTES = (() => {
   if (raw === 0) {
     return 0;
   }
-  return 1440; // default 24 hours
+  return 4320; // default 72 hours
 })();
 const NZBDAV_CACHE_TTL_MS = NZBDAV_CACHE_TTL_MINUTES > 0 ? NZBDAV_CACHE_TTL_MINUTES * 60 * 1000 : 0;
 const NZBDAV_MAX_DIRECTORY_DEPTH = 6;

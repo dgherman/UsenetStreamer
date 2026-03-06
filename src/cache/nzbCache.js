@@ -8,7 +8,7 @@ let opsUntilCleanup = CLEANUP_EVERY_N_OPS;
 const VERIFIED_NZB_CACHE_TTL_MS = (() => {
   const raw = Number(process.env.VERIFIED_NZB_CACHE_TTL_MINUTES);
   if (Number.isFinite(raw) && raw >= 0) return raw * 60 * 1000;
-  return 24 * 60 * 60 * 1000; // Default 24 hours
+  return 72 * 60 * 60 * 1000; // Default 72 hours
 })();
 
 const VERIFIED_NZB_CACHE_MAX_BYTES = (() => {
