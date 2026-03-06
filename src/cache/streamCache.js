@@ -96,6 +96,23 @@ function setStreamCacheEntry(cacheKey, payload, meta = null) {
   cleanupStreamCache();
 }
 
+function updateStreamCacheMeta(cacheKey, metaUpdater) {
+  if (!cacheKey || typeof metaUpdater !== 'function') return false;
+  const entry = streamResponseCache.get(cacheKey);
+  if (!entry) return false;
+  if (entry.expiresAt && entry.expiresAt <= Date.now()) {
+    streamResponseCache.delete(cacheKey);
+    streamCacheBytes -= entry.size;
+    return false;
+  }
+  const oldSize = entry.size;
+  entry.meta = metaUpdater(entry.meta);
+  entry.size = estimateCacheEntrySize(entry.payload, entry.meta);
+  streamCacheBytes += entry.size - oldSize;
+  entry.lastAccess = Date.now();
+  return true;
+}
+
 function getStreamCacheStats() {
   return {
     entries: streamResponseCache.size,
@@ -111,5 +128,6 @@ module.exports = {
   clearStreamResponseCache,
   getStreamCacheEntry,
   setStreamCacheEntry,
+  updateStreamCacheMeta,
   getStreamCacheStats,
 };
