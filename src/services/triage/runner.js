@@ -161,6 +161,12 @@ async function triageAndRank(nzbResults, options = {}) {
   const logger = options.logger;
   const triageOptions = { ...(options.triageOptions || {}) };
   const captureNzbPayloads = Boolean(options.captureNzbPayloads);
+  const onDecisionCb = typeof options.onDecision === 'function' ? options.onDecision : null;
+  const fireDecision = (url, decision) => {
+    if (onDecisionCb) {
+      try { onDecisionCb(url, decision); } catch (_) { /* ignore callback errors */ }
+    }
+  };
 
   const builtCandidates = buildCandidates(nzbResults);
   const constrainedCandidates = allowedIndexerSet.size > 0
@@ -278,6 +284,7 @@ async function triageAndRank(nzbResults, options = {}) {
       if (Date.now() - startTs >= timeBudgetMs) {
         timedOut = true;
         decisionMap.set(downloadUrl, makeTimeoutDecision(downloadUrl));
+        fireDecision(downloadUrl, decisionMap.get(downloadUrl));
         continue;
       }
 
@@ -335,6 +342,7 @@ async function triageAndRank(nzbResults, options = {}) {
           nzbIndex: null,
           fileCount: null,
         }));
+        fireDecision(downloadUrl, decisionMap.get(downloadUrl));
         logEvent(logger, 'warn', 'NZB download:failed', {
           downloadUrl,
           message: err?.code === 'ERR_CANCELED' || err?.message === 'canceled'
@@ -373,6 +381,7 @@ async function triageAndRank(nzbResults, options = {}) {
             summarized.nzbPayload = nzbPayload;
           }
           decisionMap.set(downloadUrl, attachMetadata(downloadUrl, summarized));
+          fireDecision(downloadUrl, decisionMap.get(downloadUrl));
           evaluatedCount += 1;
         } else {
           decisionMap.set(downloadUrl, attachMetadata(downloadUrl, {
@@ -383,11 +392,13 @@ async function triageAndRank(nzbResults, options = {}) {
             nzbIndex: null,
             fileCount: null,
           }));
+          fireDecision(downloadUrl, decisionMap.get(downloadUrl));
         }
       } catch (err) {
         if (err?.code === TIMEOUT_ERROR_CODE) {
           timedOut = true;
           decisionMap.set(downloadUrl, makeTimeoutDecision(downloadUrl));
+          fireDecision(downloadUrl, decisionMap.get(downloadUrl));
         } else {
           decisionMap.set(downloadUrl, attachMetadata(downloadUrl, {
             status: 'error',
@@ -397,6 +408,7 @@ async function triageAndRank(nzbResults, options = {}) {
             nzbIndex: null,
             fileCount: null,
           }));
+          fireDecision(downloadUrl, decisionMap.get(downloadUrl));
         }
         logEvent(logger, 'warn', 'NZB triage failed', { message: err?.message });
       }
