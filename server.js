@@ -39,7 +39,7 @@ const {
 } = require('./src/utils/publishInfo');
 const { parseReleaseMetadata, LANGUAGE_FILTERS, LANGUAGE_SYNONYMS } = require('./src/services/metadata/releaseParser');
 const cache = require('./src/cache');
-const { ensureSharedSecret } = require('./src/middleware/auth');
+const { ensureAdminSecret, ensureStreamToken, getEffectiveStreamToken } = require('./src/middleware/auth');
 const newznabService = require('./src/services/newznab');
 const easynewsService = require('./src/services/easynews');
 const { toFiniteNumber, toPositiveInt, toBoolean, parseCommaList, parsePathList, normalizeSortMode, resolvePreferredLanguages, toSizeBytesFromGb, collectConfigValues, computeManifestUrl, stripTrailingSlashes, decodeBase64Value } = require('./src/utils/config');
@@ -248,6 +248,9 @@ adminApiRouter.post('/config', async (req, res) => {
     updates.TMDB_SEARCH_LANGUAGE = incoming.TMDB_SEARCH_LANGUAGE ? String(incoming.TMDB_SEARCH_LANGUAGE) : '';
   }
 
+  // Safety: ADDON_SHARED_SECRET can never be changed via the API — only via env/docker
+  delete updates.ADDON_SHARED_SECRET;
+
   // Debug: log what we're about to save
   console.log('[ADMIN] TMDb updates to save:', {
     TMDB_API_KEY: updates.TMDB_API_KEY ? `(${updates.TMDB_API_KEY.length} chars)` : '(not in updates)',
@@ -449,10 +452,10 @@ adminApiRouter.post('/stats/reset', (req, res) => {
   }
 });
 
-app.use('/admin/api', (req, res, next) => ensureSharedSecret(req, res, next), adminApiRouter);
+app.use('/admin/api', (req, res, next) => ensureAdminSecret(req, res, next), adminApiRouter);
 app.use('/admin', adminStatic);
 app.use('/:token/admin', (req, res, next) => {
-  ensureSharedSecret(req, res, (err) => {
+  ensureAdminSecret(req, res, (err) => {
     if (err) return;
     adminStatic(req, res, next);
   });
@@ -501,7 +504,7 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/assets/')) return next();
   if (req.path.startsWith('/admin') && !req.path.startsWith('/admin/api')) return next();
   if (/^\/[^/]+\/admin/.test(req.path) && !/^\/[^/]+\/admin\/api/.test(req.path)) return next();
-  return ensureSharedSecret(req, res, next);
+  return ensureStreamToken(req, res, next);
 });
 
 // Additional authentication middleware is registered after admin routes are defined
@@ -536,6 +539,7 @@ let INDEXER_MANAGER_CACHE_MINUTES = (() => {
 let INDEXER_MANAGER_BASE_URL = INDEXER_MANAGER_URL.replace(/\/+$/, '');
 let ADDON_BASE_URL = (process.env.ADDON_BASE_URL || '').trim();
 let ADDON_SHARED_SECRET = (process.env.ADDON_SHARED_SECRET || '').trim();
+let ADDON_STREAM_TOKEN = '';
 let ADDON_NAME = (process.env.ADDON_NAME || DEFAULT_ADDON_NAME).trim() || DEFAULT_ADDON_NAME;
 const DEFAULT_MAX_RESULT_SIZE_GB = 30;
 let INDEXER_MANAGER_BACKOFF_ENABLED = toBoolean(process.env.INDEXER_MANAGER_BACKOFF_ENABLED, true);
@@ -852,6 +856,7 @@ function rebuildRuntimeConfig({ log = true } = {}) {
   currentPort = Number(process.env.PORT || 7000);
   const previousBaseUrl = ADDON_BASE_URL;
   const previousSharedSecret = ADDON_SHARED_SECRET;
+  const previousStreamToken = ADDON_STREAM_TOKEN;
 
   // Streaming mode: 'nzbdav' (default) or 'native' (Windows Stremio v5 only)
   STREAMING_MODE = (process.env.STREAMING_MODE || 'nzbdav').trim().toLowerCase();
@@ -859,6 +864,7 @@ function rebuildRuntimeConfig({ log = true } = {}) {
 
   ADDON_BASE_URL = (process.env.ADDON_BASE_URL || '').trim();
   ADDON_SHARED_SECRET = (process.env.ADDON_SHARED_SECRET || '').trim();
+  ADDON_STREAM_TOKEN = getEffectiveStreamToken();
   ADDON_NAME = (process.env.ADDON_NAME || DEFAULT_ADDON_NAME).trim() || DEFAULT_ADDON_NAME;
 
   INDEXER_MANAGER = (process.env.INDEXER_MANAGER || 'none').trim().toLowerCase();
@@ -949,7 +955,7 @@ function rebuildRuntimeConfig({ log = true } = {}) {
   maybePrewarmSharedNntpPool();
   restartSharedPoolMonitor();
   const resolvedAddonBase = ADDON_BASE_URL || `http://${SERVER_HOST}:${currentPort}`;
-  easynewsService.reloadConfig({ addonBaseUrl: resolvedAddonBase, sharedSecret: ADDON_SHARED_SECRET });
+  easynewsService.reloadConfig({ addonBaseUrl: resolvedAddonBase, sharedSecret: ADDON_STREAM_TOKEN });
 
   const portChanged = previousPort !== undefined && previousPort !== currentPort;
   if (log) {
@@ -977,7 +983,7 @@ const ADMIN_CONFIG_KEYS = [
   'STREAMING_MODE',
   'ADDON_BASE_URL',
   'ADDON_NAME',
-  'ADDON_SHARED_SECRET',
+  'ADDON_STREAM_TOKEN',
   'INDEXER_MANAGER',
   'INDEXER_MANAGER_URL',
   'INDEXER_MANAGER_API_KEY',
@@ -1385,7 +1391,7 @@ async function streamHandler(req, res) {
             stats.trackInstantHit();
             console.log(`[INSTANT CACHE] Found cached entry, skipping indexer search: ${instantEntry.jobName}`);
             console.log(`[INSTANT CACHE DEBUG] History has ${historyCheck.size} items for category: ${categoryForInstant}`);
-            const tokenSegment = ADDON_SHARED_SECRET ? `/${ADDON_SHARED_SECRET}` : '';
+            const tokenSegment = ADDON_STREAM_TOKEN ? `/${ADDON_STREAM_TOKEN}` : '';
             const addonBaseUrl = ADDON_BASE_URL.replace(/\/$/, '');
 
             // Use smart history matching to find ALL related items
@@ -3208,7 +3214,7 @@ async function streamHandler(req, res) {
           baseParams.set('fallbackUrls', fallbackUrls.join('|'));
         }
 
-        const tokenSegment = ADDON_SHARED_SECRET ? `/${ADDON_SHARED_SECRET}` : '';
+        const tokenSegment = ADDON_STREAM_TOKEN ? `/${ADDON_STREAM_TOKEN}` : '';
         const streamUrl = `${addonBaseUrl}${tokenSegment}/nzb/stream?${baseParams.toString()}`;
         const tags = [];
         if (triageTag) tags.push(triageTag);
@@ -3401,7 +3407,7 @@ async function streamHandler(req, res) {
         }
 
         // Create an instant stream for this history item
-        const tokenSegment = ADDON_SHARED_SECRET ? `/${ADDON_SHARED_SECRET}` : '';
+        const tokenSegment = ADDON_STREAM_TOKEN ? `/${ADDON_STREAM_TOKEN}` : '';
         const historyParams = new URLSearchParams({
           type,
           id,
