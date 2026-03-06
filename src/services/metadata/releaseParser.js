@@ -215,7 +215,10 @@ function parseReleaseMetadata(title) {
   const rawTitle = typeof title === 'string' ? title : '';
   const parsed = (() => {
     try {
-      return parseTorrentTitle(rawTitle) || {};
+      // Strip Usenet upload-source suffixes before parsing, so they
+      // aren't misidentified as release group names.
+      const cleaned = rawTitle.replace(/[- ](FTP|Obfuscated|AsRequested|Scrambled|Repost)(?=\.\w{2,4}$|$)/i, '');
+      return parseTorrentTitle(cleaned) || {};
     } catch (error) {
       return {};
     }
