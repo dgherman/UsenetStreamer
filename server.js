@@ -1,5 +1,14 @@
 require('dotenv').config();
 
+// Keep the server alive on unhandled errors (e.g. NNTP TLS socket EACCES)
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception (process kept alive):', err?.message || err);
+  if (err?.code) console.error('[FATAL] Error code:', err.code);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] Unhandled promise rejection (process kept alive):', reason?.message || reason);
+});
+
 const express = require('express');
 const axios = require('axios');
 const FormData = require('form-data');
@@ -3805,6 +3814,12 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
 
     await nzbdavService.proxyNzbdavStream(req, res, streamData.viewPath, streamData.fileName || '');
   } catch (error) {
+    // If the client already disconnected, don't attempt recovery or failure videos
+    if (res.destroyed || res.writableEnded) {
+      console.warn('[NZBDAV] Response already closed, skipping error handling');
+      return;
+    }
+
     // On explicit nzbdav2 failure, try fallback candidates before giving up
     if (error?.isNzbdavFailure) {
       console.warn('[NZBDAV] Stream failure detected:', error.failureMessage || error.message);
