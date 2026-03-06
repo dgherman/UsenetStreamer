@@ -707,4 +707,5 @@ module.exports = {
   validateNewznabSearch,
   getAvailableNewznabPresets,
   maskApiKey,
+  isLikelyNzb,
 };
