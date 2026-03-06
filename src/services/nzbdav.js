@@ -708,6 +708,8 @@ async function buildNzbdavStream({ downloadUrl, category, title, requestedEpisod
       if (!bestFile) {
         const noVideoError = new Error('[NZBDAV] No playable video files found after mounting NZB');
         noVideoError.code = 'NO_VIDEO_FILES';
+        noVideoError.isNzbdavFailure = true;
+        noVideoError.failureMessage = 'No playable video files found after mounting NZB';
         throw noVideoError;
       }
 
