@@ -332,7 +332,7 @@ async function waitForNzbdavHistorySlot(nzoId, category) {
   }
 }
 
-async function fetchCompletedNzbdavHistory(categories = []) {
+async function fetchNzbdavHistoryByStatus(categories = [], statusFilter = 'completed') {
   ensureNzbdavConfigured();
   const categoryList = Array.isArray(categories) && categories.length > 0
     ? Array.from(new Set(categories.filter((value) => value !== undefined && value !== null && String(value).trim() !== '')))
@@ -370,7 +370,7 @@ async function fetchCompletedNzbdavHistory(categories = []) {
 
       for (const slot of slots) {
         const status = (slot?.status || slot?.Status || '').toString().toLowerCase();
-        if (status !== 'completed') {
+        if (status !== statusFilter) {
           continue;
         }
 
@@ -391,16 +391,25 @@ async function fetchCompletedNzbdavHistory(categories = []) {
             jobName,
             category: slot?.category || slot?.Category || category || null,
             size: slot?.size || slot?.Size || null,
+            failMessage: slot?.fail_message || slot?.failMessage || slot?.FailMessage || null,
             slot
           });
         }
       }
     } catch (error) {
-      console.warn(`[NZBDAV] Failed to fetch history for category ${category || 'all'}: ${error.message}`);
+      console.warn(`[NZBDAV] Failed to fetch ${statusFilter} history for category ${category || 'all'}: ${error.message}`);
     }
   }
 
   return results;
+}
+
+async function fetchCompletedNzbdavHistory(categories = []) {
+  return fetchNzbdavHistoryByStatus(categories, 'completed');
+}
+
+async function fetchFailedNzbdavHistory(categories = []) {
+  return fetchNzbdavHistoryByStatus(categories, 'failed');
 }
 
 function buildNzbdavCacheKey(downloadUrl, category, requestedEpisode = null) {
@@ -1075,6 +1084,7 @@ module.exports = {
   addNzbToNzbdav,
   waitForNzbdavHistorySlot,
   fetchCompletedNzbdavHistory,
+  fetchFailedNzbdavHistory,
   fetchNzbdavQueue,
   findMatchingQueueJob,
   trackInFlightDownload,

@@ -2865,9 +2865,15 @@ async function streamHandler(req, res) {
     // Skip NZBDav history fetching in native streaming mode
     let historyByTitle = new Map();
     let historyByNzoId = new Map(); // Secondary lookup by nzoId for prefetched items
+    let failedByTitle = new Map();
     if (STREAMING_MODE !== 'native') {
       try {
-        historyByTitle = await nzbdavService.fetchCompletedNzbdavHistory([categoryForType]);
+        const [completedResult, failedResult] = await Promise.all([
+          nzbdavService.fetchCompletedNzbdavHistory([categoryForType]),
+          nzbdavService.fetchFailedNzbdavHistory([categoryForType]),
+        ]);
+        historyByTitle = completedResult;
+        failedByTitle = failedResult;
         if (historyByTitle.size > 0) {
           console.log(`[NZBDAV] Loaded ${historyByTitle.size} completed NZBs for instant playback detection (category=${categoryForType})`);
           // Build secondary lookup by nzoId for prefetched items that completed
@@ -2877,8 +2883,26 @@ async function streamHandler(req, res) {
             }
           }
         }
+        if (failedByTitle.size > 0) {
+          console.log(`[NZBDAV] Loaded ${failedByTitle.size} failed NZBs for filtering (category=${categoryForType})`);
+        }
       } catch (historyError) {
         console.warn(`[NZBDAV] Unable to load NZBDav history for instant detection: ${historyError.message}`);
+      }
+    }
+
+    // Filter out NZBs that previously failed in NZBDav
+    if (failedByTitle.size > 0) {
+      const beforeCount = finalNzbResults.length;
+      finalNzbResults = finalNzbResults.filter((result) => {
+        if (!result.title) return true;
+        const normalized = normalizeReleaseTitle(result.title);
+        if (!normalized) return true;
+        return !failedByTitle.has(normalized);
+      });
+      const removedCount = beforeCount - finalNzbResults.length;
+      if (removedCount > 0) {
+        console.log(`[NZBDAV] Filtered out ${removedCount} previously-failed NZBs from results`);
       }
     }
 
