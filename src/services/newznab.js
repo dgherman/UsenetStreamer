@@ -114,6 +114,14 @@ const BUILTIN_NEWZNAB_PRESETS = [
     apiKeyUrl: 'https://nzbstars.com/account'
   },
   {
+    id: 'omgwtfnzbs',
+    label: 'OMGWTFNZBs (api.omgwtfnzbs.org)',
+    endpoint: 'https://api.omgwtfnzbs.org',
+    apiPath: '/api',
+    description: 'Invite-only Newznab indexer. Use your API key from account settings.',
+    apiKeyUrl: 'https://omgwtfnzbs.org/'
+  },
+  {
     id: 'scenenzbs',
     label: 'SceneNZBs (scenenzbs.com)',
     endpoint: 'https://scenenzbs.com',
@@ -125,7 +133,7 @@ const BUILTIN_NEWZNAB_PRESETS = [
     id: 'tabularasa',
     label: 'Tabula Rasa (tabula-rasa.pw)',
     endpoint: 'https://www.tabula-rasa.pw',
-    apiPath: '/api/v1',
+    apiPath: '/api/v1/api',
     description: 'Invite-only indexer with modern API v1 endpoint.',
     apiKeyUrl: 'https://www.tabula-rasa.pw/profile'
   },
@@ -239,6 +247,21 @@ function extractErrorFromParsed(parsed) {
     }
   }
   return null;
+}
+
+function detectProtectionBlock(status, contentType, body) {
+  if (status !== 403 || !body || typeof body !== 'string') return null;
+  const normalizedType = String(contentType || '').toLowerCase();
+  const normalizedBody = body.toLowerCase();
+  const looksHtml = normalizedType.includes('text/html') || normalizedBody.includes('<html');
+  if (!looksHtml) return null;
+  const looksLikeChallenge =
+    normalizedBody.includes('just a moment') ||
+    normalizedBody.includes('cloudflare') ||
+    normalizedBody.includes('cf-challenge') ||
+    normalizedBody.includes('attention required');
+  if (!looksLikeChallenge) return null;
+  return 'Blocked by Cloudflare/WAF challenge (HTTP 403). Whitelist your server IP with the indexer.';
 }
 
 function extractErrorFromBody(body) {
@@ -445,12 +468,24 @@ function parseSizeValue(value) {
 function isLikelyNzb(url) {
   if (!url) return false;
   const normalized = url.toLowerCase();
+  const hasGetApiParam = (() => {
+    try {
+      const parsed = new URL(url);
+      const t = (parsed.searchParams.get('t') || '').toLowerCase();
+      return t === 'get' || t === 'getnzb';
+    } catch (_) {
+      return /(?:\?|&)t=get(?:&|$)/.test(normalized);
+    }
+  })();
   return (
     normalized.includes('.nzb') ||
     normalized.includes('mode=getnzb') ||
     normalized.includes('t=getnzb') ||
+    normalized.includes('t=get&') ||
+    normalized.endsWith('t=get') ||
     normalized.includes('action=getnzb') ||
-    /\bgetnzb\b/.test(normalized)
+    /\bgetnzb\b/.test(normalized) ||
+    hasGetApiParam
   );
 }
 
@@ -546,6 +581,10 @@ async function fetchIndexerResults(config, plan, options) {
   }
 
   if (response.status === 401 || response.status === 403) {
+    const protectionBlock = detectProtectionBlock(response.status, contentType, body);
+    if (protectionBlock) {
+      throw new Error(protectionBlock);
+    }
     throw new Error('Unauthorized (check API key)');
   }
   if (response.status >= 400) {
@@ -666,6 +705,10 @@ async function testNewznabCaps(config, options = {}) {
     });
   }
   if (response.status === 401 || response.status === 403) {
+    const protectionBlock = detectProtectionBlock(response.status, contentType, body);
+    if (protectionBlock) {
+      throw new Error(protectionBlock);
+    }
     throw new Error('Unauthorized (check API key)');
   }
   if (response.status >= 400) {
