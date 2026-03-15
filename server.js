@@ -2320,7 +2320,7 @@ async function streamHandler(req, res) {
           }
           const audioOnlyPattern = /\b(soundtrack|ost|score|album|flac|mp3|aac|alac|wav|ape|m4a)\b/i;
           const containerValue = (annotated?.container || '').toString().toLowerCase();
-          const isVideoContainer = /(mkv|mp4|avi|mov|wmv|mpg|mpeg|m4v|webm|ts|m2ts)/i.test(containerValue);
+          const isVideoContainer = /(mkv|mp4|avi|mov|wmv|mpg|mpeg|m4v|webm|ts)/i.test(containerValue);
           if (audioOnlyPattern.test(candidateTitle) && !isVideoContainer) {
             if (isNewznabDebugEnabled()) {
               console.log(`${INDEXER_LOG_PREFIX} Strict text match failed (audio-only title)`, {
