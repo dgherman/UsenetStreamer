@@ -57,8 +57,8 @@ function reloadConfig() {
   NZBDAV_POLL_INTERVAL_MS = 2000;
   NZBDAV_POLL_TIMEOUT_MS = (() => {
     const raw = Number(process.env.NZBDAV_POLL_TIMEOUT_SECONDS);
-    // Default 80 seconds, allow up to 10 minutes (600 seconds)
-    return Number.isFinite(raw) && raw > 0 ? Math.min(raw, 600) * 1000 : 80000;
+    // Default 240 seconds, allow up to 10 minutes (600 seconds)
+    return Number.isFinite(raw) && raw > 0 ? Math.min(raw, 600) * 1000 : 240000;
   })();
   NZBDAV_HISTORY_FETCH_LIMIT = (() => {
     const raw = Number(process.env.NZBDAV_HISTORY_FETCH_LIMIT);
