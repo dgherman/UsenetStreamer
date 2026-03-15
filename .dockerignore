@@ -20,3 +20,5 @@ statPipelineBenchmark.js
 
 test_nzbs/
 scripts
+cache/nzb_payloads/
+temp_nzbs/
