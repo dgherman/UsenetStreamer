@@ -262,6 +262,24 @@ The `handleNzbdavStream` catch block now intercepts this error *before* the `res
 
 ---
 
+### Background repair on truncation - IMPLEMENTED
+
+**Problem:** After a corrupt release is detected and marked in the negative cache, the user still had to manually return to the stream list and wait for a fresh indexer search before a replacement appeared. There was no proactive download preparation.
+
+**Solution:** When `handleNzbdavStream` detects a mid-stream truncation and marks the release as failed, it immediately fires a background repair job (`triggerBackgroundRepair`) in a `setImmediate`. The repair has two phases:
+
+1. **Phase 1 (stream cache):** Checks if the stream cache already has a triage-verified, non-blocked candidate for the same `{type, id, episode}`. If found, queues it to nzbdav2 immediately (zero network cost).
+2. **Phase 2 (fresh search):** If Phase 1 finds nothing, fires an ID-based indexer search (`{ImdbId:...}` or `{TvdbId:...}` + season/episode tokens for series) using the same `executeManagerPlanWithBackoff` + `executeNewznabPlan` machinery used by the main search handler. Picks the best non-blocked candidate using language/resolution/size/indexer-tier scoring and queues it to nzbdav2.
+
+A `repairInFlight` Map prevents duplicate concurrent repairs for the same title.
+
+**Implementation details:**
+- `findStreamCacheEntryByIds(type, id, requestedEpisode)` added to `src/cache/streamCache.js` — scans all stream cache entries by type/id/episode, ignoring the original request query params (which aren't available at truncation time)
+- `selectBestRepairCandidate(viable, opts)` added to `src/utils/helpers.js` — pure function; applies size floor (100 MB movie / 20 MB series), `ALLOWED_RESOLUTIONS` filter, paid-indexer preference, language preference; best-effort fallback ensures something is returned even when no result perfectly matches all preferences
+- `queueRepairCandidate`, `runBackgroundRepair`, `triggerBackgroundRepair` added to `server.js` near the prefetch machinery they mirror
+
+---
+
 ### Smart matching claiming exact match nzoIds - FIXED
 
 **Problem:** When smart matching ran before exact matches were processed, it would claim nzoIds that should belong to exact matches. For example, if the search results included both:

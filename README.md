@@ -40,6 +40,7 @@
 ## ✨ Feature Highlights
 
 ### 🆕 Recent Enhancements (1.3.x → 1.4.x)
+- **Background repair on truncation** — when a corrupt NZB truncates mid-stream, UsenetStreamer immediately searches for a replacement and queues it to nzbdav2, so the next stream list view shows a new ⚡ Instant option without any manual action.
 - **Smarter dedupe pipeline** — collapses near-identical releases using normalized titles, indexer IDs, and sizes, so stream rows stay tidy even with aggressive multi-indexer searches.
 - **Multi-language preferences** — pick several preferred audio languages in the admin panel; the sorter surfaces hits with 🌐 badges and falls back gracefully when none match.
 - **Two-tier sorting polish** — quality/size ordering got revamped so languages, instant hits, and per-quality limits all blend without bouncing streams around between refreshes.
