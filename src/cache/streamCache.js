@@ -123,6 +123,41 @@ function getStreamCacheStats() {
   };
 }
 
+function findStreamCacheEntryByIds(type, id, requestedEpisode) {
+  cleanupStreamCache();
+  const now = Date.now();
+  let bestEntry = null;
+  let bestAccess = -1;
+
+  for (const [key, entry] of streamResponseCache.entries()) {
+    if (entry.expiresAt && entry.expiresAt <= now) continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(key);
+    } catch {
+      continue;
+    }
+    if (parsed.type !== type || parsed.id !== id) continue;
+
+    const ep = parsed.requestedEpisode;
+    if (!requestedEpisode && !ep) {
+      // Both null — match, continue to access-time check
+    } else if (!requestedEpisode || !ep) {
+      continue; // One is null, other is not
+    } else if (ep.season !== requestedEpisode.season || ep.episode !== requestedEpisode.episode) {
+      continue;
+    }
+
+    const access = entry.lastAccess || 0;
+    if (access > bestAccess) {
+      bestAccess = access;
+      bestEntry = entry;
+    }
+  }
+
+  return bestEntry;
+}
+
 module.exports = {
   cleanupStreamCache,
   clearStreamResponseCache,
@@ -130,4 +165,5 @@ module.exports = {
   setStreamCacheEntry,
   updateStreamCacheMeta,
   getStreamCacheStats,
+  findStreamCacheEntryByIds,
 };
