@@ -532,6 +532,43 @@ async function safeStat(filePath) {
   }
 }
 
+const REPAIR_MIN_SIZE_BYTES = {
+  movie: 100 * 1024 * 1024,  // 100 MB — guards against stubs/samples
+  series: 20 * 1024 * 1024,  // 20 MB
+};
+
+function selectBestRepairCandidate(viable, { type = 'movie', allowedResolutions = [], preferredLanguages = [], isPaidIndexer = () => false } = {}) {
+  if (!Array.isArray(viable) || viable.length === 0) return null;
+
+  // Apply size floor — unknown sizes (no .size field) pass
+  const minBytes = REPAIR_MIN_SIZE_BYTES[type] ?? REPAIR_MIN_SIZE_BYTES.series;
+  const aboveFloor = viable.filter((r) => !Number.isFinite(r.size) || r.size >= minBytes);
+  const sizePool = aboveFloor.length > 0 ? aboveFloor : viable; // best-effort: use all if all under floor
+
+  // Apply resolution filter — best-effort: fall back to sizePool if filter removes everything
+  const resFiltered = filterByAllowedResolutions(sizePool, allowedResolutions);
+  const pool = resFiltered.length > 0 ? resFiltered : sizePool;
+
+  if (pool.length === 0) return null;
+
+  // Sort: paid indexer first, then language preference; preserve indexer order for ties
+  const sorted = [...pool].sort((a, b) => {
+    const aPaid = isPaidIndexer(a);
+    const bPaid = isPaidIndexer(b);
+    if (aPaid && !bPaid) return -1;
+    if (!aPaid && bPaid) return 1;
+
+    const aLang = preferredLanguages.length > 0 ? getPreferredLanguageMatch(a, preferredLanguages) : null;
+    const bLang = preferredLanguages.length > 0 ? getPreferredLanguageMatch(b, preferredLanguages) : null;
+    if (aLang && !bLang) return -1;
+    if (!aLang && bLang) return 1;
+
+    return 0;
+  });
+
+  return sorted[0] ?? null;
+}
+
 module.exports = {
   sleep,
   annotateNzbResult,
@@ -552,4 +589,5 @@ module.exports = {
   serializeFinalNzbResults,
   restoreFinalNzbResults,
   safeStat,
+  selectBestRepairCandidate,
 };
