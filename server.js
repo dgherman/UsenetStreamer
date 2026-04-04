@@ -80,6 +80,8 @@ const PREFETCH_NZBDAV_JOB_TTL_MS = 60 * 60 * 1000;
 const prefetchedNzbdavJobs = new Map();
 const prefetchNzoIdIndex = new Map(); // nzoId → downloadUrl reverse index
 const repairInFlight = new Map(); // key: "type:id:S01E02" → Promise; prevents duplicate concurrent repairs
+const repairExcludedTitles = new Map(); // normalizedTitle → expiresAt; titles that truncated and must not be re-queued
+const REPAIR_EXCLUSION_TTL_MS = 30 * 60 * 1000; // 30 min
 const TRIAGE_FINAL_STATUSES = new Set(['verified', 'blocked', 'unverified_7z']);
 
 function isTriageFinalStatus(status) {
@@ -119,15 +121,19 @@ async function queueRepairCandidate(candidate, category) {
 async function runBackgroundRepair({ type, id, requestedEpisode, title, category }) {
   console.log(`[REPAIR] Starting background repair for "${title}"`);
 
-  // Titles already queued to nzbdav2 (by any previous repair or prefetch) are excluded
-  // from consideration — prevents re-queuing the same release when a second truncation
-  // fires after the first repair completes, and breaks the loop when a replacement is
-  // itself corrupt and triggers another repair cycle.
-  const alreadyQueuedTitles = new Set(
+  // Build exclusion set: titles already queued + titles that have truncated before (from
+  // any source — nzbdav2 history, prefetch, or previous repair). Prevents ping-pong loops
+  // where two corrupt releases keep replacing each other.
+  const now = Date.now();
+  const excludedTitles = new Set(
     [...prefetchedNzbdavJobs.values()].map((j) => normalizeReleaseTitle(j.jobName || ''))
   );
+  for (const [normTitle, expiresAt] of repairExcludedTitles) {
+    if (expiresAt > now) excludedTitles.add(normTitle);
+    else repairExcludedTitles.delete(normTitle); // prune expired
+  }
   // The title that just truncated must never be picked as its own replacement
-  alreadyQueuedTitles.add(normalizeReleaseTitle(title || ''));
+  excludedTitles.add(normalizeReleaseTitle(title || ''));
 
   // ── Phase 1: stream cache ────────────────────────────────────────────────
   // findStreamCacheEntryByIds scans all entries by type/id/episode, ignoring
@@ -143,7 +149,7 @@ async function runBackgroundRepair({ type, id, requestedEpisode, title, category
       if (!r.downloadUrl) return false;
       if (BLOCKLIST_CHECKER.test(r.title)) return false;
       if (cache.isDownloadUrlFailed(r.downloadUrl)) return false;
-      if (alreadyQueuedTitles.has(normalizeReleaseTitle(r.title || ''))) return false;
+      if (excludedTitles.has(normalizeReleaseTitle(r.title || ''))) return false;
       const decision = triageDecisions.get(r.downloadUrl);
       return decision?.status === 'verified';
     }), INDEXER_MAX_RESULT_SIZE_BYTES);
@@ -197,7 +203,7 @@ async function runBackgroundRepair({ type, id, requestedEpisode, title, category
     if (!r.downloadUrl) return false;
     if (BLOCKLIST_CHECKER.test(r.title)) return false;
     if (cache.isDownloadUrlFailed(r.downloadUrl)) return false;
-    if (alreadyQueuedTitles.has(normalizeReleaseTitle(r.title || ''))) return false;
+    if (excludedTitles.has(normalizeReleaseTitle(r.title || ''))) return false;
     return true;
   }), INDEXER_MAX_RESULT_SIZE_BYTES);
 
@@ -4128,6 +4134,8 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
       if (effectiveCacheKey) {
         cache.markDownloadUrlFailed(effectiveCacheKey, error.message, 'upstream_truncated');
       }
+      // Record this title so no future repair cycle picks it again (even from a different indexer URL)
+      repairExcludedTitles.set(normalizeReleaseTitle(title || ''), Date.now() + REPAIR_EXCLUSION_TTL_MS);
       // Proactively search for and queue a replacement while the user sees the error.
       // type, id, title come from req.query destructuring at the top of handleNzbdavStream.
       // category and repairEpisode are recomputed here (they're block-scoped to the try block above).
