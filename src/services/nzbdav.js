@@ -1146,12 +1146,30 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
     return;
   }
 
+  const expectedBytes = getExpectedBytes(responseHeadersLower, totalFileSize);
+  let bytesReceived = 0;
+  const byteCounter = new Transform({
+    transform(chunk, _encoding, callback) {
+      bytesReceived += chunk.length;
+      callback(null, chunk);
+    }
+  });
+
   try {
-    await pipelineAsync(nzbdavResponse.data, res);
+    await pipelineAsync(nzbdavResponse.data, byteCounter, res);
   } catch (error) {
-    if (error?.code === 'ERR_STREAM_PREMATURE_CLOSE' || error?.code === 'ERR_STREAM_UNABLE_TO_PIPE') {
+    const isClientCloseCode = error?.code === 'ERR_STREAM_PREMATURE_CLOSE' || error?.code === 'ERR_STREAM_UNABLE_TO_PIPE';
+    if (isClientCloseCode && req.destroyed) {
       console.warn('[NZBDAV] Stream closed early by client');
       return;
+    }
+    if (isUpstreamTruncated(bytesReceived, expectedBytes, req.destroyed)) {
+      const truncErr = new Error(
+        `Upstream stream truncated: received ${bytesReceived} of ${expectedBytes} bytes`
+      );
+      truncErr.code = 'UPSTREAM_STREAM_TRUNCATED';
+      truncErr.isUpstreamTruncation = true;
+      throw truncErr;
     }
     throw error;
   }
