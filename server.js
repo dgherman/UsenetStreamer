@@ -129,13 +129,13 @@ async function runBackgroundRepair({ type, id, requestedEpisode, title, category
     const triageDecisions = restoreTriageDecisions(snapshot);
     const finalNzbResults = restoreFinalNzbResults(cachedEntry.meta.finalNzbResults || []);
 
-    const viable = finalNzbResults.filter((r) => {
+    const viable = applyMaxSizeFilter(finalNzbResults.filter((r) => {
       if (!r.downloadUrl) return false;
       if (BLOCKLIST_CHECKER.test(r.title)) return false;
       if (cache.isDownloadUrlFailed(r.downloadUrl)) return false;
       const decision = triageDecisions.get(r.downloadUrl);
       return decision?.status === 'verified';
-    });
+    }), INDEXER_MAX_RESULT_SIZE_BYTES);
 
     const best = selectBestRepairCandidate(viable, {
       type,
@@ -182,12 +182,12 @@ async function runBackgroundRepair({ type, id, requestedEpisode, title, category
     const v = s.value;
     return Array.isArray(v?.results) ? v.results : (Array.isArray(v) ? v : []);
   });
-  const viableFresh = dedupeResultsByTitle(rawResults).filter((r) => {
+  const viableFresh = applyMaxSizeFilter(dedupeResultsByTitle(rawResults).filter((r) => {
     if (!r.downloadUrl) return false;
     if (BLOCKLIST_CHECKER.test(r.title)) return false;
     if (cache.isDownloadUrlFailed(r.downloadUrl)) return false;
     return true;
-  });
+  }), INDEXER_MAX_RESULT_SIZE_BYTES);
 
   const best = selectBestRepairCandidate(viableFresh, {
     type,
