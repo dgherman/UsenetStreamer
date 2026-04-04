@@ -107,10 +107,12 @@ async function queueRepairCandidate(candidate, category) {
     jobLabel: candidate.title,
   });
   nzbdavService.trackInFlightDownload(candidate.title, added.nzoId, candidate.downloadUrl, category);
-  prefetchedNzbdavJobs.set(candidate.downloadUrl, {
-    nzoId: added.nzoId, category, jobName: candidate.title, createdAt: Date.now(),
-  });
-  if (added.nzoId) prefetchNzoIdIndex.set(added.nzoId, candidate.downloadUrl);
+  if (!prefetchedNzbdavJobs.has(candidate.downloadUrl)) {
+    prefetchedNzbdavJobs.set(candidate.downloadUrl, {
+      nzoId: added.nzoId, category, jobName: candidate.title, createdAt: Date.now(),
+    });
+    if (added.nzoId) prefetchNzoIdIndex.set(added.nzoId, candidate.downloadUrl);
+  }
   console.log(`[REPAIR] Queued replacement nzoId=${added.nzoId}: "${candidate.title}"`);
 }
 
@@ -175,7 +177,11 @@ async function runBackgroundRepair({ type, id, requestedEpisode, title, category
     executeNewznabPlan(plan),
   ]);
 
-  const rawResults = settled.flatMap((s) => (s.status === 'fulfilled' ? (s.value?.data ?? []) : []));
+  const rawResults = settled.flatMap((s) => {
+    if (s.status !== 'fulfilled') return [];
+    const v = s.value;
+    return Array.isArray(v?.results) ? v.results : (Array.isArray(v) ? v : []);
+  });
   const viableFresh = dedupeResultsByTitle(rawResults).filter((r) => {
     if (!r.downloadUrl) return false;
     if (BLOCKLIST_CHECKER.test(r.title)) return false;
@@ -211,7 +217,7 @@ function triggerBackgroundRepair({ type, id, requestedEpisode, title, category }
       try {
         await runBackgroundRepair({ type, id, requestedEpisode, title, category });
       } catch (err) {
-        console.error('[REPAIR] Unhandled error in background repair:', err.message);
+        console.error('[REPAIR] Unhandled error in background repair:', err?.message || err);
       } finally {
         repairInFlight.delete(key);
         resolve();
