@@ -4116,6 +4116,12 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
       if (effectiveCacheKey) {
         cache.markDownloadUrlFailed(effectiveCacheKey, error.message, 'upstream_truncated');
       }
+      // Proactively search for and queue a replacement while the user sees the error.
+      // type, id, title come from req.query destructuring at the top of handleNzbdavStream.
+      // category and repairEpisode are recomputed here (they're block-scoped to the try block above).
+      const repairEpisode = parseRequestedEpisode(type, id, req.query || {});
+      const repairCategory = nzbdavService.getNzbdavCategory(type);
+      triggerBackgroundRepair({ type, id, requestedEpisode: repairEpisode, title, category: repairCategory });
       return;
     }
 
