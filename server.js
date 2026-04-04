@@ -44,7 +44,7 @@ const newznabService = require('./src/services/newznab');
 const easynewsService = require('./src/services/easynews');
 const { toFiniteNumber, toPositiveInt, toBoolean, parseCommaList, parsePathList, normalizeSortMode, resolvePreferredLanguages, toSizeBytesFromGb, collectConfigValues, computeManifestUrl, stripTrailingSlashes, decodeBase64Value } = require('./src/utils/config');
 const { normalizeReleaseTitle, parseRequestedEpisode, isVideoFileName, fileMatchesEpisode, normalizeNzbdavPath, inferMimeType, normalizeIndexerToken, nzbMatchesIndexer, cleanSpecialSearchTitle, findMatchingHistoryItems } = require('./src/utils/parsers');
-const { sleep, annotateNzbResult, applyMaxSizeFilter, prepareSortedResults, getPreferredLanguageMatch, getPreferredLanguageMatches, triageStatusRank, buildTriageTitleMap, prioritizeTriageCandidates, triageDecisionsMatchStatuses, sanitizeDecisionForCache, serializeFinalNzbResults, restoreFinalNzbResults, safeStat } = require('./src/utils/helpers');
+const { sleep, annotateNzbResult, applyMaxSizeFilter, prepareSortedResults, getPreferredLanguageMatch, getPreferredLanguageMatches, triageStatusRank, buildTriageTitleMap, prioritizeTriageCandidates, triageDecisionsMatchStatuses, sanitizeDecisionForCache, serializeFinalNzbResults, restoreFinalNzbResults, safeStat, selectBestRepairCandidate } = require('./src/utils/helpers');
 const indexerService = require('./src/services/indexer');
 const nzbdavService = require('./src/services/nzbdav');
 const nzbdavWs = require('./src/services/nzbdavWebSocket');
@@ -79,6 +79,7 @@ let BLOCKLIST_CHECKER = blocklist.buildBlocklistFromEnv(process.env.NZB_BLOCKLIS
 const PREFETCH_NZBDAV_JOB_TTL_MS = 60 * 60 * 1000;
 const prefetchedNzbdavJobs = new Map();
 const prefetchNzoIdIndex = new Map(); // nzoId → downloadUrl reverse index
+const repairInFlight = new Map(); // key: "type:id:S01E02" → Promise; prevents duplicate concurrent repairs
 const TRIAGE_FINAL_STATUSES = new Set(['verified', 'blocked', 'unverified_7z']);
 
 function isTriageFinalStatus(status) {
@@ -95,6 +96,131 @@ function prunePrefetchedNzbdavJobs() {
       prefetchedNzbdavJobs.delete(key);
     }
   }
+}
+
+async function queueRepairCandidate(candidate, category) {
+  const cachedEntry = cache.getVerifiedNzbCacheEntry(candidate.downloadUrl);
+  const added = await nzbdavService.addNzbToNzbdav({
+    downloadUrl: candidate.downloadUrl,
+    cachedEntry,
+    category,
+    jobLabel: candidate.title,
+  });
+  nzbdavService.trackInFlightDownload(candidate.title, added.nzoId, candidate.downloadUrl, category);
+  prefetchedNzbdavJobs.set(candidate.downloadUrl, {
+    nzoId: added.nzoId, category, jobName: candidate.title, createdAt: Date.now(),
+  });
+  if (added.nzoId) prefetchNzoIdIndex.set(added.nzoId, candidate.downloadUrl);
+  console.log(`[REPAIR] Queued replacement nzoId=${added.nzoId}: "${candidate.title}"`);
+}
+
+async function runBackgroundRepair({ type, id, requestedEpisode, title, category }) {
+  console.log(`[REPAIR] Starting background repair for "${title}"`);
+
+  // ── Phase 1: stream cache ────────────────────────────────────────────────
+  // findStreamCacheEntryByIds scans all entries by type/id/episode, ignoring
+  // the original query params that we no longer have at this call site.
+  const cachedEntry = cache.findStreamCacheEntryByIds(type, id, requestedEpisode);
+  const snapshot = cachedEntry?.meta?.triageDecisionsSnapshot;
+
+  if (snapshot) {
+    const triageDecisions = restoreTriageDecisions(snapshot);
+    const finalNzbResults = restoreFinalNzbResults(cachedEntry.meta.finalNzbResults || []);
+
+    const viable = finalNzbResults.filter((r) => {
+      if (!r.downloadUrl) return false;
+      if (BLOCKLIST_CHECKER.test(r.title)) return false;
+      if (cache.isDownloadUrlFailed(r.downloadUrl)) return false;
+      const decision = triageDecisions.get(r.downloadUrl);
+      return decision?.status === 'verified';
+    });
+
+    const best = selectBestRepairCandidate(viable, {
+      type,
+      allowedResolutions: ALLOWED_RESOLUTIONS,
+      preferredLanguages: INDEXER_PREFERRED_LANGUAGES,
+      isPaidIndexer: isResultFromPaidIndexer,
+    });
+
+    if (best) {
+      console.log(`[REPAIR] Phase 1: queuing cached candidate "${best.title}"`);
+      await queueRepairCandidate(best, category);
+      return;
+    }
+    console.log('[REPAIR] Phase 1: no viable verified candidate in stream cache, falling through to fresh search');
+  } else {
+    console.log('[REPAIR] Phase 1: stream cache cold, falling through to fresh search');
+  }
+
+  // ── Phase 2: fresh ID-based indexer search ───────────────────────────────
+  const imdbMatch = /^tt\d+$/i.test(id) ? id : null;
+  const tvdbMatch = /^tvdb:(\d+)/i.exec(id)?.[1] ?? null;
+
+  if (!imdbMatch && !tvdbMatch) {
+    console.warn(`[REPAIR] Cannot build ID-based search plan for id="${id}", giving up`);
+    return;
+  }
+
+  const searchType = type === 'series' ? 'tvsearch' : 'movie';
+  const idToken = tvdbMatch ? `{TvdbId:${tvdbMatch}}` : `{ImdbId:${imdbMatch}}`;
+  const tokens = [idToken];
+  if (type === 'series' && requestedEpisode) {
+    tokens.push(`{Season:${requestedEpisode.season}}`, `{Episode:${requestedEpisode.episode}}`);
+  }
+  const plan = { type: searchType, query: tokens.join(' '), tokens };
+
+  console.log('[REPAIR] Phase 2: executing fresh indexer search', plan);
+  const settled = await Promise.allSettled([
+    executeManagerPlanWithBackoff(plan),
+    executeNewznabPlan(plan),
+  ]);
+
+  const rawResults = settled.flatMap((s) => (s.status === 'fulfilled' ? (s.value?.data ?? []) : []));
+  const viableFresh = dedupeResultsByTitle(rawResults).filter((r) => {
+    if (!r.downloadUrl) return false;
+    if (BLOCKLIST_CHECKER.test(r.title)) return false;
+    if (cache.isDownloadUrlFailed(r.downloadUrl)) return false;
+    return true;
+  });
+
+  const best = selectBestRepairCandidate(viableFresh, {
+    type,
+    allowedResolutions: ALLOWED_RESOLUTIONS,
+    preferredLanguages: INDEXER_PREFERRED_LANGUAGES,
+    isPaidIndexer: isResultFromPaidIndexer,
+  });
+
+  if (!best) {
+    console.warn(`[REPAIR] Phase 2: no viable replacement found for "${title}"`);
+    return;
+  }
+
+  console.log(`[REPAIR] Phase 2: queuing fresh candidate "${best.title}"`);
+  await queueRepairCandidate(best, category);
+}
+
+function triggerBackgroundRepair({ type, id, requestedEpisode, title, category }) {
+  const key = `${type}:${id}:${requestedEpisode ? `S${requestedEpisode.season}E${requestedEpisode.episode}` : ''}`;
+  if (repairInFlight.has(key)) {
+    console.log(`[REPAIR] Background repair already in-flight for ${key}`);
+    return;
+  }
+
+  const promise = new Promise((resolve) => {
+    setImmediate(async () => {
+      try {
+        await runBackgroundRepair({ type, id, requestedEpisode, title, category });
+      } catch (err) {
+        console.error('[REPAIR] Unhandled error in background repair:', err.message);
+      } finally {
+        repairInFlight.delete(key);
+        resolve();
+      }
+    });
+  });
+
+  repairInFlight.set(key, promise);
+  console.log(`[REPAIR] Background repair triggered for "${title}" (${key})`);
 }
 
 // Find which downloadUrl a prefetched nzoId belongs to
