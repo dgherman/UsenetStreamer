@@ -3964,7 +3964,8 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
   } catch (error) {
     // If upstream (nzbdav2) truncated the stream mid-response, mark the URL as failed
     // so Stremio's automatic retry uses a fallback NZB instead of hitting the same corrupt file.
-    // We do this BEFORE the res.writableEnded check because we need to mark it regardless.
+    // Do this BEFORE the res.writableEnded check — headers are already sent so we cannot
+    // inline-fallback; the negative cache ensures the *next* Stremio request skips this URL.
     if (error?.isUpstreamTruncation && downloadUrl) {
       console.warn('[NZBDAV] Upstream truncated stream mid-response - marking for next retry:', error.message);
       cache.markDownloadUrlFailed(downloadUrl, error.message, 'upstream_truncated');
