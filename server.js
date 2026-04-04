@@ -1445,6 +1445,9 @@ async function streamHandler(req, res) {
                 continue;
               }
 
+              // Skip known-corrupt releases
+              if (cache.isDownloadUrlFailed(`nzoid:${historyEntry.nzoId}`)) continue;
+
               const streamUrl = `${addonBaseUrl}${tokenSegment}/nzb/stream?` + new URLSearchParams({
                 downloadUrl: historyEntry.nzoId === historyMatch.nzoId ? (instantEntry.downloadUrl || '') : '',
                 type,
@@ -1474,28 +1477,31 @@ async function streamHandler(req, res) {
             }
 
             // Fallback: just return the cached entry if no matches found
-            const streamUrl = `${addonBaseUrl}${tokenSegment}/nzb/stream?` + new URLSearchParams({
-              downloadUrl: instantEntry.downloadUrl || '',
-              type,
-              id,
-              title: instantEntry.jobName,
-              historyNzoId: historyMatch.nzoId,
-              historyJobName: historyMatch.jobName,
-              historyCategory: historyMatch.category || categoryForInstant,
-            }).toString();
+            // Skip if this single entry is known-corrupt — fall through to indexer search instead
+            if (!cache.isDownloadUrlFailed(`nzoid:${historyMatch.nzoId}`)) {
+              const streamUrl = `${addonBaseUrl}${tokenSegment}/nzb/stream?` + new URLSearchParams({
+                downloadUrl: instantEntry.downloadUrl || '',
+                type,
+                id,
+                title: instantEntry.jobName,
+                historyNzoId: historyMatch.nzoId,
+                historyJobName: historyMatch.jobName,
+                historyCategory: historyMatch.category || categoryForInstant,
+              }).toString();
 
-            const instantStream = {
-              name: `${ADDON_NAME || 'UsenetStreamer'}\n⚡ Instant`,
-              title: instantEntry.jobName,
-              url: streamUrl,
-              behaviorHints: {
-                bingeGroup: `usenetstreamer-instant-${baseIdentifier}`,
-                notWebReady: true,
-              },
-            };
+              const instantStream = {
+                name: `${ADDON_NAME || 'UsenetStreamer'}\n⚡ Instant`,
+                title: instantEntry.jobName,
+                url: streamUrl,
+                behaviorHints: {
+                  bingeGroup: `usenetstreamer-instant-${baseIdentifier}`,
+                  notWebReady: true,
+                },
+              };
 
-            res.json({ streams: [instantStream] });
-            return;
+              res.json({ streams: [instantStream] });
+              return;
+            }
           } else {
             // Entry no longer in history, clear the cache
             console.log(`[INSTANT CACHE] Cached entry no longer in history, clearing: ${instantEntry.jobName}`);
@@ -3567,6 +3573,9 @@ async function streamHandler(req, res) {
         if (type === 'series' && requestedEpisode && !fileMatchesEpisode(historyEntry.jobName, requestedEpisode)) {
           continue;
         }
+
+        // Skip known-corrupt releases
+        if (cache.isDownloadUrlFailed(`nzoid:${historyEntry.nzoId}`)) continue;
 
         // Create an instant stream for this history item
         const tokenSegment = ADDON_STREAM_TOKEN ? `/${ADDON_STREAM_TOKEN}` : '';
