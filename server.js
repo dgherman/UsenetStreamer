@@ -3808,6 +3808,10 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
     return;
   }
 
+  // Unified negative-cache key: use downloadUrl when available, otherwise key on the
+  // nzbdav2 history nzoId (prefixed to avoid collision with real URLs).
+  const effectiveCacheKey = downloadUrl || (historyNzoId ? `nzoid:${historyNzoId}` : '');
+
   // Block unwanted release types at stream level (catches cached/stale results)
   if (title && BLOCKLIST_CHECKER.test(title)) {
     console.log(`[NZBDAV] Blocked stream request for blocklisted release: ${title}`);
@@ -3828,12 +3832,12 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
     return false; // No more fallbacks
   };
 
-  // Check negative cache - skip known-bad download URLs
-  const failedEntry = cache.isDownloadUrlFailed(downloadUrl);
+  // Check negative cache - skip known-bad download URLs or history NZBs
+  const failedEntry = cache.isDownloadUrlFailed(effectiveCacheKey);
   if (failedEntry) {
-    console.log(`[NEGATIVE CACHE] Skipping known-failed URL: ${downloadUrl.slice(0, 80)}... (reason: ${failedEntry.failureReason})`);
+    console.log(`[NEGATIVE CACHE] Skipping known-failed ${downloadUrl ? 'URL' : 'NZB'}: ${effectiveCacheKey.slice(0, 80)}... (reason: ${failedEntry.failureReason})`);
     // Try fallback if available
-    const triedFallback = await tryNextFallback(downloadUrl, new Error(failedEntry.failureReason));
+    const triedFallback = await tryNextFallback(effectiveCacheKey, new Error(failedEntry.failureReason));
     if (triedFallback !== false) return;
     res.status(502).json({ error: `Previously failed: ${failedEntry.failureReason}` });
     return;
@@ -3967,16 +3971,16 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
     // Do this BEFORE the res.writableEnded check — headers are already sent so we cannot
     // inline-fallback; the negative cache ensures the *next* Stremio request skips this URL.
     if (error?.isUpstreamTruncation) {
-      console.warn('[NZBDAV] Upstream truncated stream mid-response - downloadUrl=%s error=%s', downloadUrl || '(empty)', error.message);
-      if (downloadUrl) {
-        cache.markDownloadUrlFailed(downloadUrl, error.message, 'upstream_truncated');
+      console.warn('[NZBDAV] Upstream truncated stream mid-response - marking for next retry:', error.message);
+      if (effectiveCacheKey) {
+        cache.markDownloadUrlFailed(effectiveCacheKey, error.message, 'upstream_truncated');
       }
       return;
     }
 
     // If the client already disconnected, don't attempt recovery or failure videos
     if (res.destroyed || res.writableEnded) {
-      console.warn('[NZBDAV] Response already closed, skipping error handling err=%s', error?.code || error?.message);
+      console.warn('[NZBDAV] Response already closed, skipping error handling');
       return;
     }
 
