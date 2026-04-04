@@ -1158,14 +1158,15 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
   try {
     await pipelineAsync(nzbdavResponse.data, byteCounter, res);
   } catch (error) {
-    console.warn('[NZBDAV TRUNC DEBUG] code=%s req.destroyed=%s bytesReceived=%d expectedBytes=%s',
-      error?.code, req.destroyed, bytesReceived, expectedBytes);
     const isClientCloseCode = error?.code === 'ERR_STREAM_PREMATURE_CLOSE' || error?.code === 'ERR_STREAM_UNABLE_TO_PIPE';
     if (isClientCloseCode && req.destroyed) {
       console.warn('[NZBDAV] Stream closed early by client');
       return;
     }
-    if (isUpstreamTruncated(bytesReceived, expectedBytes, req.destroyed)) {
+    // For upstream ECONNRESET, Stremio may have already destroyed req in reaction to
+    // the connection drop. Only treat req.destroyed as client-caused when paired with
+    // a client-close error code (ERR_STREAM_PREMATURE_CLOSE / ERR_STREAM_UNABLE_TO_PIPE).
+    if (isUpstreamTruncated(bytesReceived, expectedBytes, isClientCloseCode && req.destroyed)) {
       const truncErr = new Error(
         `Upstream stream truncated: received ${bytesReceived} of ${expectedBytes} bytes`
       );
