@@ -119,6 +119,14 @@ async function queueRepairCandidate(candidate, category) {
 async function runBackgroundRepair({ type, id, requestedEpisode, title, category }) {
   console.log(`[REPAIR] Starting background repair for "${title}"`);
 
+  // Titles already queued to nzbdav2 (by any previous repair or prefetch) are excluded
+  // from consideration — prevents re-queuing the same release when a second truncation
+  // fires after the first repair completes, and breaks the loop when a replacement is
+  // itself corrupt and triggers another repair cycle.
+  const alreadyQueuedTitles = new Set(
+    [...prefetchedNzbdavJobs.values()].map((j) => normalizeReleaseTitle(j.jobName || ''))
+  );
+
   // ── Phase 1: stream cache ────────────────────────────────────────────────
   // findStreamCacheEntryByIds scans all entries by type/id/episode, ignoring
   // the original query params that we no longer have at this call site.
@@ -133,6 +141,7 @@ async function runBackgroundRepair({ type, id, requestedEpisode, title, category
       if (!r.downloadUrl) return false;
       if (BLOCKLIST_CHECKER.test(r.title)) return false;
       if (cache.isDownloadUrlFailed(r.downloadUrl)) return false;
+      if (alreadyQueuedTitles.has(normalizeReleaseTitle(r.title || ''))) return false;
       const decision = triageDecisions.get(r.downloadUrl);
       return decision?.status === 'verified';
     }), INDEXER_MAX_RESULT_SIZE_BYTES);
@@ -186,6 +195,7 @@ async function runBackgroundRepair({ type, id, requestedEpisode, title, category
     if (!r.downloadUrl) return false;
     if (BLOCKLIST_CHECKER.test(r.title)) return false;
     if (cache.isDownloadUrlFailed(r.downloadUrl)) return false;
+    if (alreadyQueuedTitles.has(normalizeReleaseTitle(r.title || ''))) return false;
     return true;
   }), INDEXER_MAX_RESULT_SIZE_BYTES);
 
