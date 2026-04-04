@@ -126,6 +126,8 @@ async function runBackgroundRepair({ type, id, requestedEpisode, title, category
   const alreadyQueuedTitles = new Set(
     [...prefetchedNzbdavJobs.values()].map((j) => normalizeReleaseTitle(j.jobName || ''))
   );
+  // The title that just truncated must never be picked as its own replacement
+  alreadyQueuedTitles.add(normalizeReleaseTitle(title || ''));
 
   // ── Phase 1: stream cache ────────────────────────────────────────────────
   // findStreamCacheEntryByIds scans all entries by type/id/episode, ignoring
