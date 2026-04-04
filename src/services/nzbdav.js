@@ -4,7 +4,7 @@ const FormData = require('form-data');
 const path = require('path');
 const fs = require('fs');
 const { promisify } = require('util');
-const { pipeline } = require('stream');
+const { pipeline, Transform } = require('stream');
 const cache = require('../cache');
 const { normalizeReleaseTitle, normalizeNzbdavPath, isVideoFileName, fileMatchesEpisode, inferMimeType } = require('../utils/parsers');
 const { sleep, safeStat } = require('../utils/helpers');
@@ -1157,6 +1157,37 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
   }
 }
 
+/**
+ * Returns the number of bytes the upstream response promised to deliver,
+ * or null if the information is not available.
+ * @param {Object} responseHeadersLower - Response headers keyed in lowercase
+ * @param {number|null} totalFileSize - Pre-fetched file size from HEAD request
+ * @returns {number|null}
+ */
+function getExpectedBytes(responseHeadersLower, totalFileSize) {
+  const cl = Number(responseHeadersLower?.['content-length']);
+  if (Number.isFinite(cl) && cl > 0) return cl;
+  if (Number.isFinite(totalFileSize) && totalFileSize > 0) return totalFileSize;
+  return null;
+}
+
+/**
+ * Returns true when evidence clearly shows the upstream (nzbdav2) closed the
+ * connection before delivering the promised bytes, and the client is still alive.
+ * @param {number} bytesReceived - Bytes actually piped to the client
+ * @param {number|null} expectedBytes - Bytes the upstream declared via Content-Length
+ * @param {boolean} reqDestroyed - Whether the client request socket is already destroyed
+ * @returns {boolean}
+ */
+function isUpstreamTruncated(bytesReceived, expectedBytes, reqDestroyed) {
+  return (
+    Number.isFinite(expectedBytes) &&
+    bytesReceived > 0 &&
+    bytesReceived < expectedBytes &&
+    !reqDestroyed
+  );
+}
+
 module.exports = {
   ensureNzbdavConfigured,
   getNzbdavCategory,
@@ -1181,4 +1212,7 @@ module.exports = {
   proxyNzbdavStream,
   getWebdavClient,
   reloadConfig,
+  // Exported for testing
+  getExpectedBytes,
+  isUpstreamTruncated,
 };
