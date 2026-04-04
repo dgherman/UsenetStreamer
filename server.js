@@ -3966,15 +3966,17 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
     // so Stremio's automatic retry uses a fallback NZB instead of hitting the same corrupt file.
     // Do this BEFORE the res.writableEnded check — headers are already sent so we cannot
     // inline-fallback; the negative cache ensures the *next* Stremio request skips this URL.
-    if (error?.isUpstreamTruncation && downloadUrl) {
-      console.warn('[NZBDAV] Upstream truncated stream mid-response - marking for next retry:', error.message);
-      cache.markDownloadUrlFailed(downloadUrl, error.message, 'upstream_truncated');
+    if (error?.isUpstreamTruncation) {
+      console.warn('[NZBDAV] Upstream truncated stream mid-response - downloadUrl=%s error=%s', downloadUrl || '(empty)', error.message);
+      if (downloadUrl) {
+        cache.markDownloadUrlFailed(downloadUrl, error.message, 'upstream_truncated');
+      }
       return;
     }
 
     // If the client already disconnected, don't attempt recovery or failure videos
     if (res.destroyed || res.writableEnded) {
-      console.warn('[NZBDAV] Response already closed, skipping error handling');
+      console.warn('[NZBDAV] Response already closed, skipping error handling err=%s', error?.code || error?.message);
       return;
     }
 
