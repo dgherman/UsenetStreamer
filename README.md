@@ -211,6 +211,13 @@ Anything that can load HTTPS manifests and handle `externalPlayer` hints should 
 
 ---
 
+## 📝 Changelog
+
+### [next] - 2026-04-03
+- Fix: mid-stream truncation fallback — corrupt Usenet segments (YENC CRC failures) now mark the download URL in the negative cache so Stremio's automatic retry routes to a fallback NZB instead of hitting the same corrupt file repeatedly
+
+---
+
 ## 🤝 Support & Community
 
 - **Discord:** [Join the chat](https://discord.gg/tUwNjXSZZN)

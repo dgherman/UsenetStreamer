@@ -244,6 +244,24 @@ NZB_BLOCKLIST_PATTERNS=remux,[xxx],/\.iso$/i,bdmv,disc
 
 ## Bug Fixes
 
+### Mid-stream truncation fallback - FIXED
+
+**Problem:** When nzbdav2 encountered corrupt Usenet data (YENC CRC32 failures) mid-stream, it closed the HTTP connection before sending the declared Content-Length bytes. UsenetStreamer's pipeline error handler treated this identically to a client disconnect — silently returning without writing a negative cache entry. Every subsequent Stremio retry served the same corrupt NZB.
+
+**Solution:** Added a byte-counting Transform to `proxyNzbdavStream`'s pipeline. When the pipeline errors, the handler checks: (a) bytes received < Content-Length, (b) at least one byte was received, (c) the client socket is still alive. If all three hold, it throws a typed `UPSTREAM_STREAM_TRUNCATED` error instead of returning silently.
+
+The `handleNzbdavStream` catch block now intercepts this error *before* the `res.writableEnded` bail-out and calls `markDownloadUrlFailed()`. On Stremio's automatic retry, the existing negative cache check fires and `tryNextFallback` routes to the next viable candidate (e.g. a different release already prefetched).
+
+**Implementation details:**
+- Added `getExpectedBytes(responseHeadersLower, totalFileSize)` and `isUpstreamTruncated(bytesReceived, expectedBytes, reqDestroyed)` helper functions to `src/services/nzbdav.js`
+- Byte counter uses a pass-through Transform — no extra memory or buffering
+- `expectedBytes` from response `Content-Length` header (covers both full and range requests)
+- Falls back to `totalFileSize` from pre-fetched HEAD request for non-range requests
+- Detection skipped entirely if Content-Length is unavailable (fail-safe)
+- New negative cache reason code: `upstream_truncated`
+
+---
+
 ### Smart matching claiming exact match nzoIds - FIXED
 
 **Problem:** When smart matching ran before exact matches were processed, it would claim nzoIds that should belong to exact matches. For example, if the search results included both:
