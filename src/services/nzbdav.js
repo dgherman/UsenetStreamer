@@ -1160,7 +1160,7 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
 /**
  * Returns the number of bytes the upstream response promised to deliver,
  * or null if the information is not available.
- * @param {Object} responseHeadersLower - Response headers keyed in lowercase
+ * @param {Object|null} responseHeadersLower - Response headers keyed in lowercase
  * @param {number|null} totalFileSize - Pre-fetched file size from HEAD request
  * @returns {number|null}
  */

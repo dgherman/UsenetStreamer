@@ -24,6 +24,10 @@ describe('getExpectedBytes', () => {
     expect(getExpectedBytes({ 'content-length': 'abc' }, null)).toBeNull();
     expect(getExpectedBytes({ 'content-length': '0' }, null)).toBeNull();
   });
+
+  it('handles null responseHeadersLower without throwing', () => {
+    expect(getExpectedBytes(null, 500000000)).toBe(500000000);
+  });
 });
 
 describe('isUpstreamTruncated', () => {
