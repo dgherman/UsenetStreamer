@@ -82,6 +82,39 @@ const FAILURE_VIDEO_PATH = path.resolve(__dirname, '../../assets', 'failure_vide
 const VIDEO_TYPE_FAILURE_PATH = path.resolve(__dirname, '../../assets', 'video_type_failure.mp4');
 const ADDON_VERSION = '1.6.0';
 
+// Submission concurrency limiter — prevents flooding nzbdav2's queue
+const SUBMISSION_MAX_CONCURRENT = Number(process.env.NZBDAV_MAX_CONCURRENT_SUBMISSIONS) || 2;
+const SUBMISSION_TIMEOUT_MS = 120000; // 120s max wait for a submission slot
+let submissionActiveCount = 0;
+const submissionWaiters = []; // FIFO queue of { resolve, reject, timer }
+
+function acquireSubmissionSlot() {
+  if (submissionActiveCount < SUBMISSION_MAX_CONCURRENT) {
+    submissionActiveCount++;
+    return Promise.resolve();
+  }
+  console.log(`[NZBDAV] Submission slot full (${submissionActiveCount}/${SUBMISSION_MAX_CONCURRENT}), queuing request (${submissionWaiters.length + 1} waiting)`);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const idx = submissionWaiters.findIndex(w => w.resolve === resolve);
+      if (idx !== -1) submissionWaiters.splice(idx, 1);
+      reject(new Error(`[NZBDAV] Submission queue timeout after ${SUBMISSION_TIMEOUT_MS / 1000}s (${submissionActiveCount} active, ${submissionWaiters.length} waiting)`));
+    }, SUBMISSION_TIMEOUT_MS);
+    submissionWaiters.push({ resolve, reject, timer });
+  });
+}
+
+function releaseSubmissionSlot() {
+  if (submissionWaiters.length > 0) {
+    const next = submissionWaiters.shift();
+    clearTimeout(next.timer);
+    next.resolve();
+    // Don't decrement — the slot transfers to the next waiter
+  } else {
+    submissionActiveCount = Math.max(0, submissionActiveCount - 1);
+  }
+}
+
 function ensureNzbdavConfigured() {
   if (!NZBDAV_URL) {
     throw new Error('NZBDAV_URL is not configured');
@@ -136,6 +169,15 @@ function extractNzbdavQueueId(payload) {
 async function addNzbToNzbdav({ downloadUrl, cachedEntry = null, category, jobLabel }) {
   ensureNzbdavConfigured();
 
+  await acquireSubmissionSlot();
+  try {
+    return await _addNzbToNzbdavInner({ downloadUrl, cachedEntry, category, jobLabel });
+  } finally {
+    releaseSubmissionSlot();
+  }
+}
+
+async function _addNzbToNzbdavInner({ downloadUrl, cachedEntry = null, category, jobLabel }) {
   if (!category) {
     throw new Error('Missing NZBDav category');
   }
