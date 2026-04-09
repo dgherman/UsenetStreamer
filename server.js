@@ -4005,6 +4005,7 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
   try {
     const category = nzbdavService.getNzbdavCategory(type);
     const requestedEpisode = parseRequestedEpisode(type, id, req.query || {});
+    const episodeKey = `${type}:${id}`;
     // For history-only streams, use historyNzoId as the cache key identifier
     const cacheKeyIdentifier = downloadUrl || `history:${historyNzoId}`;
     const cacheKey = nzbdavService.buildNzbdavCacheKey(cacheKeyIdentifier, category, requestedEpisode);
@@ -4070,6 +4071,7 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
         requestedEpisode,
         existingSlot: existingSlotHint,
         inlineCachedEntry: inlineEasynewsEntry,
+        episodeKey,
       })
     );
 
@@ -4092,6 +4094,7 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
           requestedEpisode,
           existingSlot: existingSlotHint,
           inlineCachedEntry: inlineEasynewsEntry,
+          episodeKey,
         });
       }
     }
@@ -4124,6 +4127,10 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
     }
 
     await nzbdavService.proxyNzbdavStream(req, res, streamData.viewPath, streamData.fileName || '');
+    // Successful stream — reset episode attempt counter
+    if (episodeKey) {
+      cache.resetEpisodeAttempts(episodeKey);
+    }
   } catch (error) {
     // If upstream (nzbdav2) truncated the stream mid-response, mark the URL as failed
     // so Stremio's automatic retry uses a fallback NZB instead of hitting the same corrupt file.

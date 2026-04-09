@@ -700,7 +700,7 @@ async function findBestVideoFile({ category, jobName, requestedEpisode }) {
   return bestEpisodeMatch || bestMatch;
 }
 
-async function buildNzbdavStream({ downloadUrl, category, title, requestedEpisode, existingSlot = null, inlineCachedEntry = null }) {
+async function buildNzbdavStream({ downloadUrl, category, title, requestedEpisode, existingSlot = null, inlineCachedEntry = null, episodeKey = null }) {
   let reuseError = null;
   const attempts = [];
   if (existingSlot?.nzoId) {
@@ -737,6 +737,17 @@ async function buildNzbdavStream({ downloadUrl, category, title, requestedEpisod
           clearInFlightDownload(title);
         } else {
           // No existing download found, queue a new one
+          // Check episode attempt limit before submitting new NZB
+          if (episodeKey) {
+            const limitCheck = cache.checkEpisodeAttemptLimit(episodeKey);
+            if (!limitCheck.allowed) {
+              const limitError = new Error(`[NZBDAV] Episode attempt limit reached (${limitCheck.attempts}/${limitCheck.maxAttempts}) for ${episodeKey}`);
+              limitError.isNzbdavFailure = true;
+              limitError.failureMessage = `Episode attempt limit reached (${limitCheck.attempts}/${limitCheck.maxAttempts})`;
+              throw limitError;
+            }
+            cache.incrementEpisodeAttempts(episodeKey);
+          }
           const cachedNzbEntry = inlineCachedEntry || cache.getVerifiedNzbCacheEntry(downloadUrl);
           if (cachedNzbEntry) {
             console.log('[CACHE] Using verified NZB payload', { downloadUrl });

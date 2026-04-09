@@ -9,6 +9,11 @@ const failedDownloadUrlCache = new Map();
 let NZBDAV_CACHE_TTL_MS = 72 * 60 * 60 * 1000;
 let NEGATIVE_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours default
 
+// Episode-level attempt tracking — prevents retrying the same episode with dozens of NZBs
+const episodeAttemptCache = new Map();
+let EPISODE_ATTEMPT_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours default
+let MAX_EPISODE_ATTEMPTS = 5;
+
 function reloadNzbdavCacheConfig() {
   const raw = Number(process.env.NZBDAV_CACHE_TTL_MINUTES);
   if (Number.isFinite(raw) && raw >= 0) {
@@ -23,6 +28,21 @@ function reloadNzbdavCacheConfig() {
     NEGATIVE_CACHE_TTL_MS = negativeRaw * 60 * 60 * 1000;
   } else {
     NEGATIVE_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours default
+  }
+
+  // Episode attempt limit
+  const maxAttempts = Number(process.env.EPISODE_MAX_ATTEMPTS);
+  if (Number.isFinite(maxAttempts) && maxAttempts > 0) {
+    MAX_EPISODE_ATTEMPTS = maxAttempts;
+  } else {
+    MAX_EPISODE_ATTEMPTS = 5;
+  }
+
+  const attemptTtlHours = Number(process.env.EPISODE_ATTEMPT_TTL_HOURS);
+  if (Number.isFinite(attemptTtlHours) && attemptTtlHours > 0) {
+    EPISODE_ATTEMPT_TTL_MS = attemptTtlHours * 60 * 60 * 1000;
+  } else {
+    EPISODE_ATTEMPT_TTL_MS = 6 * 60 * 60 * 1000;
   }
 }
 
@@ -259,6 +279,75 @@ function getNzbdavCacheStats() {
   return stats;
 }
 
+// --- Episode attempt tracking ---
+
+function cleanupEpisodeAttempts() {
+  const now = Date.now();
+  for (const [key, entry] of episodeAttemptCache.entries()) {
+    if (entry.expiresAt && entry.expiresAt <= now) {
+      episodeAttemptCache.delete(key);
+    }
+  }
+}
+
+function checkEpisodeAttemptLimit(episodeKey) {
+  cleanupEpisodeAttempts();
+  const entry = episodeAttemptCache.get(episodeKey);
+  if (!entry || (entry.expiresAt && entry.expiresAt <= Date.now())) {
+    episodeAttemptCache.delete(episodeKey);
+    return { allowed: true, attempts: 0, maxAttempts: MAX_EPISODE_ATTEMPTS };
+  }
+  return {
+    allowed: entry.attempts < MAX_EPISODE_ATTEMPTS,
+    attempts: entry.attempts,
+    maxAttempts: MAX_EPISODE_ATTEMPTS,
+  };
+}
+
+function incrementEpisodeAttempts(episodeKey) {
+  cleanupEpisodeAttempts();
+  const existing = episodeAttemptCache.get(episodeKey);
+  const attempts = existing ? existing.attempts + 1 : 1;
+  episodeAttemptCache.set(episodeKey, {
+    attempts,
+    firstAttemptAt: existing?.firstAttemptAt || Date.now(),
+    lastAttemptAt: Date.now(),
+    expiresAt: Date.now() + EPISODE_ATTEMPT_TTL_MS,
+  });
+  if (attempts >= MAX_EPISODE_ATTEMPTS) {
+    console.log(`[EPISODE LIMIT] Episode ${episodeKey} reached attempt limit (${attempts}/${MAX_EPISODE_ATTEMPTS})`);
+  }
+  return attempts;
+}
+
+function resetEpisodeAttempts(episodeKey) {
+  if (episodeAttemptCache.has(episodeKey)) {
+    episodeAttemptCache.delete(episodeKey);
+    console.log(`[EPISODE LIMIT] Reset attempts for ${episodeKey} (successful stream)`);
+  }
+}
+
+function clearAllEpisodeAttempts(reason = 'manual') {
+  if (episodeAttemptCache.size > 0) {
+    console.log('[EPISODE LIMIT] Cleared all episode attempt counters', { reason, entries: episodeAttemptCache.size });
+  }
+  episodeAttemptCache.clear();
+}
+
+function getEpisodeAttemptStats() {
+  cleanupEpisodeAttempts();
+  const entries = [];
+  for (const [key, entry] of episodeAttemptCache.entries()) {
+    entries.push({ episodeKey: key, ...entry });
+  }
+  return {
+    entries,
+    count: episodeAttemptCache.size,
+    maxAttempts: MAX_EPISODE_ATTEMPTS,
+    ttlMs: EPISODE_ATTEMPT_TTL_MS,
+  };
+}
+
 module.exports = {
   cleanupNzbdavCache,
   clearNzbdavStreamCache,
@@ -274,4 +363,10 @@ module.exports = {
   getNegativeCacheEntries,
   getNzbdavCacheStats,
   reloadNzbdavCacheConfig,
+  // Episode attempt tracking exports
+  checkEpisodeAttemptLimit,
+  incrementEpisodeAttempts,
+  resetEpisodeAttempts,
+  clearAllEpisodeAttempts,
+  getEpisodeAttemptStats,
 };
