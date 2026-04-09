@@ -44,6 +44,12 @@ const poolStats = {
   closed: 0,
 };
 
+// Per-pool ECONNRESET backoff tracker
+const poolBackoff = new Map(); // poolId → { until, consecutiveResets, lastErrorAt }
+const BACKOFF_BASE_MS = 2000;
+const BACKOFF_MAX_MS = 30000;
+const BACKOFF_DECAY_MS = 60000; // Reset counter after 60s of no errors
+
 function markTriageActivity() {
   lastTriageActivityTs = Date.now();
 }
@@ -2518,8 +2524,59 @@ async function createNntpPool(config, maxConnections, options = {}) {
   };
 }
 
+function getPoolId(pool) {
+  if (!pool._backoffId) {
+    pool._backoffId = `pool_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+  return pool._backoffId;
+}
+
+async function waitForBackoff(pool) {
+  const id = getPoolId(pool);
+  const entry = poolBackoff.get(id);
+  if (!entry) return;
+
+  // Decay: if no errors for BACKOFF_DECAY_MS, reset
+  if (Date.now() - entry.lastErrorAt > BACKOFF_DECAY_MS) {
+    poolBackoff.delete(id);
+    return;
+  }
+
+  const remaining = entry.until - Date.now();
+  if (remaining > 0) {
+    timingLog('nntp-backoff:waiting', { poolId: id, waitMs: remaining, consecutiveResets: entry.consecutiveResets });
+    await new Promise(resolve => setTimeout(resolve, remaining));
+  }
+}
+
+function recordPoolError(pool) {
+  const id = getPoolId(pool);
+  const existing = poolBackoff.get(id);
+  const consecutiveResets = existing ? existing.consecutiveResets + 1 : 1;
+  const backoffMs = Math.min(BACKOFF_BASE_MS * Math.pow(2, consecutiveResets - 1), BACKOFF_MAX_MS);
+  poolBackoff.set(id, {
+    until: Date.now() + backoffMs,
+    consecutiveResets,
+    lastErrorAt: Date.now(),
+  });
+  timingLog('nntp-backoff:recorded', { poolId: id, backoffMs, consecutiveResets });
+}
+
+function recordPoolSuccess(pool) {
+  const id = getPoolId(pool);
+  if (poolBackoff.has(id)) {
+    poolBackoff.delete(id);
+  }
+}
+
+const CONNECTION_ERROR_CODES = new Set(['ETIMEDOUT', 'ECONNRESET', 'ECONNABORTED', 'EPIPE']);
+
 async function runWithClient(pool, handler) {
   if (!pool) throw new Error('NNTP pool unavailable');
+
+  // Wait for any active backoff before acquiring a client
+  await waitForBackoff(pool);
+
   const acquireStart = Date.now();
   const client = await pool.acquire();
   timingLog('nntp-client:acquired', {
@@ -2529,9 +2586,15 @@ async function runWithClient(pool, handler) {
   if (!client) throw new Error('NNTP client unavailable');
   let dropClient = false;
   try {
-    return await handler(client);
+    const result = await handler(client);
+    recordPoolSuccess(pool);
+    return result;
   } catch (err) {
     if (err?.dropClient) dropClient = true;
+    // Track connection-level errors for backoff
+    if (CONNECTION_ERROR_CODES.has(err?.code)) {
+      recordPoolError(pool);
+    }
     throw err;
   } finally {
     pool.release(client, { drop: dropClient });
