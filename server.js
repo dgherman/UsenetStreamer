@@ -42,7 +42,7 @@ const cache = require('./src/cache');
 const { ensureAdminSecret, ensureStreamToken, getEffectiveStreamToken } = require('./src/middleware/auth');
 const newznabService = require('./src/services/newznab');
 const easynewsService = require('./src/services/easynews');
-const { toFiniteNumber, toPositiveInt, toBoolean, parseCommaList, parsePathList, normalizeSortMode, resolvePreferredLanguages, toSizeBytesFromGb, collectConfigValues, computeManifestUrl, stripTrailingSlashes, decodeBase64Value } = require('./src/utils/config');
+const { toFiniteNumber, toPositiveInt, toNonNegativeInt, toBoolean, parseCommaList, parsePathList, normalizeSortMode, resolvePreferredLanguages, toSizeBytesFromGb, collectConfigValues, computeManifestUrl, stripTrailingSlashes, decodeBase64Value } = require('./src/utils/config');
 const { normalizeReleaseTitle, parseRequestedEpisode, isVideoFileName, fileMatchesEpisode, normalizeNzbdavPath, inferMimeType, normalizeIndexerToken, nzbMatchesIndexer, cleanSpecialSearchTitle, findMatchingHistoryItems } = require('./src/utils/parsers');
 const { sleep, annotateNzbResult, applyMaxSizeFilter, prepareSortedResults, getPreferredLanguageMatch, getPreferredLanguageMatches, triageStatusRank, buildTriageTitleMap, prioritizeTriageCandidates, triageDecisionsMatchStatuses, sanitizeDecisionForCache, serializeFinalNzbResults, restoreFinalNzbResults, safeStat, selectBestRepairCandidate } = require('./src/utils/helpers');
 const indexerService = require('./src/services/indexer');
@@ -939,7 +939,7 @@ let TRIAGE_ARCHIVE_SAMPLE_COUNT = toPositiveInt(process.env.NZB_TRIAGE_ARCHIVE_S
 let TRIAGE_REUSE_POOL = toBoolean(process.env.NZB_TRIAGE_REUSE_POOL, true);
 let TRIAGE_NNTP_KEEP_ALIVE_MS = toPositiveInt(process.env.NZB_TRIAGE_NNTP_KEEP_ALIVE_MS, 0);
 let TRIAGE_PREFETCH_FIRST_VERIFIED = toBoolean(process.env.NZB_TRIAGE_PREFETCH_FIRST_VERIFIED, true);
-let TRIAGE_PREFETCH_COUNT = toPositiveInt(process.env.NZB_PREFETCH_COUNT, 1); // How many candidates to prefetch (1-3 recommended)
+let TRIAGE_PREFETCH_COUNT = toNonNegativeInt(process.env.NZB_PREFETCH_COUNT, 1); // Max in-flight prefetched episodes (0 to disable)
 
 let TRIAGE_BASE_OPTIONS = {
   maxDecodedBytes: TRIAGE_MAX_DECODED_BYTES,
@@ -1107,7 +1107,7 @@ function rebuildRuntimeConfig({ log = true } = {}) {
   TRIAGE_REUSE_POOL = toBoolean(process.env.NZB_TRIAGE_REUSE_POOL, true);
   TRIAGE_NNTP_KEEP_ALIVE_MS = toPositiveInt(process.env.NZB_TRIAGE_NNTP_KEEP_ALIVE_MS, 0);
   TRIAGE_PREFETCH_FIRST_VERIFIED = toBoolean(process.env.NZB_TRIAGE_PREFETCH_FIRST_VERIFIED, true);
-  TRIAGE_PREFETCH_COUNT = toPositiveInt(process.env.NZB_PREFETCH_COUNT, 1);
+  TRIAGE_PREFETCH_COUNT = toNonNegativeInt(process.env.NZB_PREFETCH_COUNT, 1);
   TRIAGE_BASE_OPTIONS = {
     maxDecodedBytes: TRIAGE_MAX_DECODED_BYTES,
     nntpMaxConnections: TRIAGE_NNTP_MAX_CONNECTIONS,
@@ -1356,7 +1356,10 @@ const STREAM_HIGH_WATER_MARK = (() => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 4 * 1024 * 1024;
 })();
 
-const STREAM_CACHE_MAX_ENTRIES = 1000; // Max entries in stream response cache
+const STREAM_CACHE_MAX_ENTRIES = (() => {
+  const val = Number(process.env.STREAM_CACHE_MAX_ENTRIES);
+  return Number.isFinite(val) && val >= 0 ? val : 1000;
+})(); // Max entries in stream response cache
 
 const CINEMETA_URL = 'https://v3-cinemeta.strem.io/meta';
 const pipelineAsync = promisify(pipeline);
@@ -3047,20 +3050,16 @@ async function streamHandler(req, res) {
           return 0;
         });
 
-        // Take up to TRIAGE_PREFETCH_COUNT candidates
-        const count = Math.min(TRIAGE_PREFETCH_COUNT, sortedCandidates.length);
-        for (let i = 0; i < count; i++) {
-          const candidate = sortedCandidates[i];
+        // Take best candidate for prefetch
+        if (sortedCandidates.length > 0) {
+          const candidate = sortedCandidates[0];
           prefetchCandidates.push({
             downloadUrl: candidate.downloadUrl,
             title: candidate.title,
             category: categoryForType,
             requestedEpisode,
           });
-        }
-        if (prefetchCandidates.length > 0) {
-          const titles = prefetchCandidates.map(c => c.title).join(', ');
-          console.log(`[PREFETCH] Selected ${prefetchCandidates.length} candidate(s): ${titles}`);
+          console.log(`[PREFETCH] Selected candidate: ${candidate.title}`);
         }
       }
     } else if (triageDecisions && triageDecisions.size > 0) {
@@ -3091,10 +3090,9 @@ async function streamHandler(req, res) {
             return 0;
           });
 
-          // Take up to TRIAGE_PREFETCH_COUNT candidates
-          const count = Math.min(TRIAGE_PREFETCH_COUNT, sortedCandidates.length);
-          for (let i = 0; i < count; i++) {
-            const { candidate, decision } = sortedCandidates[i];
+          // Take best candidate for prefetch
+          if (sortedCandidates.length > 0) {
+            const { candidate, decision } = sortedCandidates[0];
             prefetchCandidates.push({
               downloadUrl: candidate.downloadUrl,
               title: candidate.title,
@@ -3108,12 +3106,9 @@ async function streamHandler(req, res) {
               fileName: candidate.title,
             });
             delete decision.nzbPayload;
+            console.log(`[PREFETCH] Selected candidate (early): ${candidate.title}`);
           }
-          if (prefetchCandidates.length > 0) {
-            const titles = prefetchCandidates.map(c => c.title).join(', ');
-            console.log(`[PREFETCH] Selected ${prefetchCandidates.length} candidate(s) (early): ${titles}`);
-          }
-        } else {
+        } else if (TRIAGE_PREFETCH_COUNT > 0) {
           // Fallback: If no verified candidates, select best unverified candidate for prefetch
           // This gives the user something to try rather than nothing (only prefetch 1 unverified)
           const unverifiedCandidates = [];
@@ -3801,12 +3796,18 @@ async function streamHandler(req, res) {
 
     res.json(responsePayload);
 
-    // Prefetch multiple candidates (configurable via NZB_PREFETCH_COUNT)
-    if (TRIAGE_PREFETCH_FIRST_VERIFIED && STREAMING_MODE !== 'native' && prefetchCandidates.length > 0) {
+    // Prefetch best candidate to nzbdav2 (capped by NZB_PREFETCH_COUNT total in-flight episodes)
+    if (TRIAGE_PREFETCH_FIRST_VERIFIED && STREAMING_MODE !== 'native' && prefetchCandidates.length > 0 && TRIAGE_PREFETCH_COUNT > 0) {
       prunePrefetchedNzbdavJobs();
       let prefetchedCount = 0;
 
-      for (const prefetchCandidate of prefetchCandidates) {
+      // Cap total in-flight prefetched episodes (not per-request)
+      if (prefetchedNzbdavJobs.size >= TRIAGE_PREFETCH_COUNT) {
+        console.log(`[NZBDAV] Skipping prefetch - already ${prefetchedNzbdavJobs.size} in-flight (cap: ${TRIAGE_PREFETCH_COUNT})`);
+        prefetchCandidates = [];
+      }
+
+      for (const prefetchCandidate of prefetchCandidates.slice(0, 1)) {
         // Skip prefetch if already in nzbdav2 history (instant playback available)
         // Use fuzzy matching because NzbDAV2 truncates job names (~100 chars),
         // so exact normalized-title lookup misses entries with long names.

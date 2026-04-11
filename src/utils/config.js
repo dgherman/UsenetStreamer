@@ -73,6 +73,12 @@ function toPositiveInt(value, defaultValue) {
   return Math.floor(parsed);
 }
 
+function toNonNegativeInt(value, defaultValue) {
+  const parsed = toFiniteNumber(value, undefined);
+  if (!Number.isFinite(parsed) || parsed < 0) return defaultValue;
+  return Math.floor(parsed);
+}
+
 function toBoolean(value, defaultValue = false) {
   if (value === undefined || value === null || value === '') return defaultValue;
   if (typeof value === 'boolean') return value;
@@ -184,6 +190,7 @@ module.exports = {
   stripTrailingSlashes,
   toFiniteNumber,
   toPositiveInt,
+  toNonNegativeInt,
   toBoolean,
   parseCommaList,
   parsePathList,
