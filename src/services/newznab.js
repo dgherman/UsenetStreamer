@@ -24,6 +24,171 @@ const XML_PARSE_OPTIONS = {
 const DEFAULT_REQUEST_TIMEOUT_MS = 10000;
 const DEBUG_BODY_CHAR_LIMIT = 1200;
 const NEWZNAB_TEST_LOG_PREFIX = '[NEWZNAB][TEST]';
+
+// Caps (capabilities) cache — tracks which search params each indexer supports
+const newznabCapsCache = new Map();
+
+function normalizeCapsType(rawType) {
+  const value = (rawType || '').toLowerCase();
+  if (value === 'tv-search' || value === 'tvsearch') return 'tvsearch';
+  if (value === 'movie-search' || value === 'movie') return 'movie';
+  return 'search';
+}
+
+function parseSupportedParamsFromXml(xml) {
+  if (!xml || typeof xml !== 'string') return null;
+  const regex = /<(search|tv-search|movie-search)[^>]*supportedparams="([^"]+)"/gi;
+  const supportedByType = {
+    search: new Set(),
+    tvsearch: new Set(),
+    movie: new Set(),
+  };
+  let match = null;
+  while ((match = regex.exec(xml)) !== null) {
+    const type = normalizeCapsType(match[1]);
+    const raw = match[2] || '';
+    raw.split(/[,\s]+/)
+      .map((token) => token.trim())
+      .filter(Boolean)
+      .forEach((token) => supportedByType[type].add(token.toLowerCase()));
+  }
+  const hasAny = Object.values(supportedByType).some((set) => set.size > 0);
+  return hasAny ? supportedByType : null;
+}
+
+function loadCapsCacheFromEnv() {
+  const raw = process.env.NEWZNAB_CAPS_CACHE || '';
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+    Object.entries(parsed).forEach(([key, value]) => {
+      if (!key) return;
+      const capsRecord = { search: new Set(), tvsearch: new Set(), movie: new Set() };
+      if (Array.isArray(value)) {
+        value.map((entry) => String(entry).toLowerCase()).filter(Boolean)
+          .forEach((token) => capsRecord.search.add(token));
+      } else if (value && typeof value === 'object') {
+        ['search', 'tvsearch', 'movie'].forEach((type) => {
+          const list = Array.isArray(value[type]) ? value[type] : [];
+          list.map((entry) => String(entry).toLowerCase()).filter(Boolean)
+            .forEach((token) => capsRecord[type].add(token));
+        });
+      }
+      newznabCapsCache.set(key, { supportedParams: capsRecord, fetchedAt: Date.now(), persisted: true });
+    });
+  } catch (error) {
+    console.warn('[NEWZNAB] Failed to parse NEWZNAB_CAPS_CACHE:', error?.message || error);
+  }
+}
+
+async function fetchNewznabCaps(config, options = {}) {
+  if (!config?.endpoint || !config.apiKey) return null;
+  const requestUrl = config.baseUrl || `${config.endpoint}${config.apiPath}`;
+  const params = { t: 'caps', apikey: config.apiKey };
+  const response = await axios.get(requestUrl, {
+    params,
+    timeout: options.timeoutMs || 12000,
+    responseType: 'text',
+    validateStatus: () => true,
+  });
+  if (response.status === 401 || response.status === 403) {
+    throw new Error('Unauthorized (check API key)');
+  }
+  if (response.status >= 400) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const body = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
+  const explicitError = extractErrorFromBody(body);
+  if (explicitError) {
+    throw new Error(explicitError);
+  }
+  return parseSupportedParamsFromXml(body);
+}
+
+const DEFAULT_CAPS = {
+  search: new Set(['q']),
+  tvsearch: new Set(['q', 'tvdbid', 'season', 'ep']),
+  movie: new Set(['q', 'imdbid']),
+};
+
+function getDefaultCaps() {
+  return {
+    search: new Set(DEFAULT_CAPS.search),
+    tvsearch: new Set(DEFAULT_CAPS.tvsearch),
+    movie: new Set(DEFAULT_CAPS.movie),
+  };
+}
+
+function getSupportedParamsForType(supportedParams, planType) {
+  if (!supportedParams) return null;
+  if (supportedParams instanceof Set) return supportedParams;
+  const normalizedType = normalizeCapsType(planType);
+  if (supportedParams[normalizedType] instanceof Set) return supportedParams[normalizedType];
+  return null;
+}
+
+async function getSupportedParams(config, options = {}) {
+  if (!config?.dedupeKey) return null;
+  const cacheKey = config.dedupeKey;
+  const cached = newznabCapsCache.get(cacheKey);
+  if (cached && !options.forceRefresh) {
+    return getSupportedParamsForType(cached.supportedParams, options.planType);
+  }
+  try {
+    const supportedParams = await fetchNewznabCaps(config, options);
+    newznabCapsCache.set(cacheKey, { supportedParams, fetchedAt: Date.now() });
+    return getSupportedParamsForType(supportedParams, options.planType);
+  } catch (error) {
+    console.warn(`[NEWZNAB][CAPS] Failed to fetch caps for ${config.displayName || config.dedupeKey}, using defaults:`, error?.message || error);
+    const defaults = getDefaultCaps();
+    newznabCapsCache.set(cacheKey, { supportedParams: defaults, fetchedAt: Date.now() });
+    return getSupportedParamsForType(defaults, options.planType);
+  }
+}
+
+async function refreshCapsCache(configs, options = {}) {
+  const eligible = filterUsableConfigs(configs, { requireEnabled: true, requireApiKey: true });
+  const results = {};
+  await Promise.all(eligible.map(async (config) => {
+    try {
+      const supportedParams = await fetchNewznabCaps(config, { ...options, forceRefresh: true });
+      if (supportedParams) {
+        results[config.dedupeKey] = {
+          search: Array.from(supportedParams.search || []),
+          tvsearch: Array.from(supportedParams.tvsearch || []),
+          movie: Array.from(supportedParams.movie || []),
+        };
+      }
+    } catch (error) {
+      console.warn(`[NEWZNAB][CAPS] Failed to refresh caps for ${config.displayName || config.dedupeKey}:`, error?.message || error);
+      const defaults = getDefaultCaps();
+      results[config.dedupeKey] = {
+        search: Array.from(defaults.search),
+        tvsearch: Array.from(defaults.tvsearch),
+        movie: Array.from(defaults.movie),
+      };
+    }
+  }));
+  return results;
+}
+
+function extractRequiredIdParams(plan) {
+  const required = new Set();
+  if (!plan || !Array.isArray(plan.tokens)) return required;
+  plan.tokens.forEach((token) => {
+    if (!token || typeof token !== 'string') return;
+    const match = token.match(/^\{([^:]+):/);
+    if (!match) return;
+    const key = match[1].trim().toLowerCase();
+    if (['imdbid', 'tvdbid', 'tmdbid'].includes(key)) {
+      required.add(key);
+    }
+  });
+  return required;
+}
+
+loadCapsCacheFromEnv();
 const BUILTIN_NEWZNAB_PRESETS = [
   {
     id: 'nzbgeek',
@@ -563,7 +728,25 @@ function normalizeNewznabItem(item, config, { filterNzbOnly = true } = {}) {
 }
 
 async function fetchIndexerResults(config, plan, options) {
-  const params = buildSearchParams(plan);
+  const supportedParams = options.supportedParams instanceof Set ? options.supportedParams : null;
+  let effectivePlan = plan;
+  if (supportedParams && Array.isArray(plan?.tokens)) {
+    const filteredTokens = plan.tokens.filter((token) => {
+      if (!token || typeof token !== 'string') return false;
+      const match = token.match(/^\{([^:]+):/);
+      if (!match) return true;
+      const key = match[1].trim().toLowerCase();
+      if (supportedParams.has(key)) return true;
+      if (key === 'episode' && supportedParams.has('ep')) return true;
+      if (key === 'ep' && supportedParams.has('episode')) return true;
+      return false;
+    });
+    effectivePlan = { ...plan, tokens: filteredTokens };
+    if (effectivePlan.rawQuery && !supportedParams.has('q')) {
+      effectivePlan = { ...effectivePlan, rawQuery: null };
+    }
+  }
+  const params = buildSearchParams(effectivePlan);
   params.apikey = config.apiKey;
   const requestUrl = config.baseUrl || `${config.endpoint}${config.apiPath}`;
   const safeParams = { ...params, apikey: maskApiKey(params.apikey) };
@@ -641,9 +824,51 @@ async function searchNewznabIndexers(plan, configs, options = {}) {
     return { results: [], errors: ['No enabled Newznab indexers configured'], endpoints: [] };
   }
 
-  const tasks = eligible.map((config) =>
-    fetchIndexerResults(config, plan, settings)
+  const requiredIdParams = extractRequiredIdParams(plan);
+  const supportedMatrix = await Promise.all(
+    eligible.map(async (config) => ({
+      config,
+      supportedParams: await getSupportedParams(config, { ...settings, planType: plan?.type }),
+    }))
   );
+
+  const filteredEligible = supportedMatrix
+    .filter(({ config, supportedParams }) => {
+      if (requiredIdParams.size === 0) return true;
+      if (!supportedParams || supportedParams.size === 0) {
+        if (settings.debug) {
+          console.log(`${settings.label}[SKIP] ${config.displayName} missing caps for required ID params: ${Array.from(requiredIdParams).join(', ')}`);
+        }
+        return false;
+      }
+      const missing = [];
+      for (const key of requiredIdParams) {
+        if (!supportedParams.has(key)) {
+          missing.push(key);
+        }
+      }
+      if (missing.length > 0) {
+        if (settings.debug) {
+          console.log(`${settings.label}[SKIP] ${config.displayName} does not support required ID params`, {
+            required: Array.from(requiredIdParams),
+            missing,
+            supported: Array.from(supportedParams),
+          });
+        }
+        return false;
+      }
+      return true;
+    })
+    .map(({ config }) => config);
+
+  if (!filteredEligible.length) {
+    return { results: [], errors: ['No enabled Newznab indexers support the requested IDs'], endpoints: [] };
+  }
+
+  const tasks = filteredEligible.map((config) => {
+    const supportedParams = supportedMatrix.find((entry) => entry.config === config)?.supportedParams || null;
+    return fetchIndexerResults(config, plan, { ...settings, supportedParams });
+  });
 
   const settled = await Promise.allSettled(tasks);
   const aggregated = [];
@@ -651,7 +876,7 @@ async function searchNewznabIndexers(plan, configs, options = {}) {
   const endpoints = [];
 
   settled.forEach((result, idx) => {
-    const config = eligible[idx];
+    const config = filteredEligible[idx];
     if (result.status === 'fulfilled') {
       aggregated.push(...result.value.items);
       endpoints.push({
@@ -773,4 +998,8 @@ module.exports = {
   getAvailableNewznabPresets,
   maskApiKey,
   isLikelyNzb,
+  refreshCapsCache,
+  getSupportedParams,
+  extractRequiredIdParams,
+  newznabCapsCache,
 };
