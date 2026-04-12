@@ -27,7 +27,7 @@ const DEFAULT_OPTIONS = {
   nntpConfig: null,
   healthCheckTimeoutMs: 35000,
   maxDecodedBytes: 256 * 1024,
-  nntpMaxConnections: 60,
+  nntpMaxConnections: 12,
   reuseNntpPool: true,
   nntpKeepAliveMs: 120000 ,
   maxParallelNzbs: Number.POSITIVE_INFINITY,
@@ -142,9 +142,21 @@ async function preWarmNntpPool(options = {}) {
   const poolKey = buildPoolKey(config.nntpConfig, desiredConnections, keepAliveMs);
 
   // If there's already a build in progress, await it instead of starting a second one
+  const POOL_BUILD_TIMEOUT_MS = 30000;
   const existingBuild = getInFlightPoolBuild();
   if (existingBuild) {
-    await existingBuild;
+    console.log('[NZB TRIAGE] Waiting for existing in-flight pool build (timeout: 30s)...');
+    const buildStart = Date.now();
+    await Promise.race([
+      existingBuild,
+      new Promise((resolve) => setTimeout(resolve, POOL_BUILD_TIMEOUT_MS)),
+    ]).catch(() => {});
+    if (getInFlightPoolBuild() === existingBuild) {
+      console.warn(`[NZB TRIAGE] In-flight pool build timed out after ${Date.now() - buildStart} ms — clearing stuck promise`);
+      clearInFlightPoolBuild(existingBuild);
+    } else {
+      console.log(`[NZB TRIAGE] In-flight pool build completed in ${Date.now() - buildStart} ms`);
+    }
     return;
   }
 
@@ -225,6 +237,7 @@ async function triageNzbs(nzbStrings, options = {}) {
       && sharedNntpPoolRecord?.key === poolKey
       && sharedNntpPoolRecord?.pool;
 
+    let needsFreshPool = false;
     if (canReuseSharedPool) {
       nntpPool = sharedNntpPoolRecord.pool;
       if (typeof nntpPool?.touch === 'function') {
@@ -232,6 +245,12 @@ async function triageNzbs(nzbStrings, options = {}) {
       }
       recordPoolReuse(nntpPool, { reason: 'config-match' });
     } else {
+      console.log(`[NZB TRIAGE] No reusable pool: reuseNntpPool=${config.reuseNntpPool}, stale=${sharedPoolStale}, keyMatch=${sharedNntpPoolRecord?.key === poolKey}, hasPool=${Boolean(sharedNntpPoolRecord?.pool)}`);
+      needsFreshPool = true;
+    }
+    if (needsFreshPool) {
+      console.log('[NZB TRIAGE] Creating fresh NNTP pool...');
+      const poolBuildStart = Date.now();
       const hadSharedPool = Boolean(sharedNntpPoolRecord?.pool);
       if (config.reuseNntpPool && hadSharedPool && !getInFlightPoolBuild()) {
         await closeSharedNntpPool(sharedPoolStale ? 'stale' : 'replaced');
@@ -251,8 +270,10 @@ async function triageNzbs(nzbStrings, options = {}) {
             })();
             setInFlightPoolBuild(buildPromise);
           }
+          console.log('[NZB TRIAGE] Waiting for pool build promise...');
           nntpPool = await buildPromise;
           clearInFlightPoolBuild(buildPromise);
+          console.log(`[NZB TRIAGE] Pool build completed in ${Date.now() - poolBuildStart} ms (idle=${nntpPool?.getIdleCount?.() ?? '?'})`);
         } else {
           const freshPool = await createNntpPool(config.nntpConfig, desiredConnections, { keepAliveMs });
           nntpPool = freshPool;
@@ -2464,6 +2485,8 @@ async function createNntpPool(config, maxConnections, options = {}) {
     }
   };
 
+  const ACQUIRE_TIMEOUT_MS = 15000;
+
   const acquireClient = () => new Promise((resolve, reject) => {
     if (closing) {
       reject(new Error('NNTP pool closing'));
@@ -2475,7 +2498,28 @@ async function createNntpPool(config, maxConnections, options = {}) {
       touch();
       resolve(client);
     } else {
-      waiters.push(resolve);
+      console.log(`[NZB TRIAGE] Pool acquire queued — 0 idle clients, ${waiters.length} already waiting (timeout: ${ACQUIRE_TIMEOUT_MS} ms)`);
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const idx = waiters.indexOf(waiterResolve);
+        if (idx !== -1) waiters.splice(idx, 1);
+        const err = new Error('NNTP pool acquire timed out — all clients busy');
+        err.code = 'ACQUIRE_TIMEOUT';
+        reject(err);
+      }, ACQUIRE_TIMEOUT_MS);
+      const waiterResolve = (client) => {
+        if (settled) {
+          // Timed out already — put client back
+          if (client) releaseClient(client, false);
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(client);
+      };
+      waiters.push(waiterResolve);
     }
   });
 
@@ -2640,8 +2684,14 @@ function decodeYencBuffer(bodyBuffer, maxBytes) {
   return out.slice(0, writeIndex);
 }
 
+const DEFAULT_NNTP_CONN_TIMEOUT_MS = 15000;
+
 async function createNntpClient({ host, port = 119, user, pass, useTLS = false, connTimeout }) {
   if (!NNTP) throw new Error('NNTP client unavailable');
+
+  const effectiveConnTimeout = Number.isFinite(connTimeout) && connTimeout > 0
+    ? connTimeout
+    : DEFAULT_NNTP_CONN_TIMEOUT_MS;
 
   const client = new NNTP();
   const connectStart = Date.now();
@@ -2743,7 +2793,7 @@ async function createNntpClient({ host, port = 119, user, pass, useTLS = false, 
       secure: useTLS,
       user,
       password: pass,
-      connTimeout,
+      connTimeout: effectiveConnTimeout,
     });
   });
   return client;

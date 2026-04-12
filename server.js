@@ -967,7 +967,7 @@ const MAX_NEWZNAB_INDEXERS = newznabService.MAX_NEWZNAB_INDEXERS;
 const NEWZNAB_NUMBERED_KEYS = newznabService.NEWZNAB_NUMBERED_KEYS;
 
 function maybePrewarmSharedNntpPool() {
-  if (!TRIAGE_REUSE_POOL || !TRIAGE_NNTP_CONFIG) {
+  if (!TRIAGE_ENABLED || !TRIAGE_REUSE_POOL || !TRIAGE_NNTP_CONFIG) {
     return;
   }
   const options = buildSharedPoolOptions();
@@ -982,7 +982,7 @@ function maybePrewarmSharedNntpPool() {
 }
 
 function triggerRequestTriagePrewarm(reason = 'request') {
-  if (!TRIAGE_REUSE_POOL || !TRIAGE_NNTP_CONFIG) {
+  if (!TRIAGE_ENABLED || !TRIAGE_REUSE_POOL || !TRIAGE_NNTP_CONFIG) {
     return null;
   }
   const options = buildSharedPoolOptions();
@@ -997,7 +997,7 @@ function restartSharedPoolMonitor() {
     clearInterval(sharedPoolMonitorTimer);
     sharedPoolMonitorTimer = null;
   }
-  if (!TRIAGE_REUSE_POOL || !TRIAGE_NNTP_CONFIG) {
+  if (!TRIAGE_ENABLED || !TRIAGE_REUSE_POOL || !TRIAGE_NNTP_CONFIG) {
     return;
   }
   const intervalMs = Math.max(30000, TRIAGE_NNTP_KEEP_ALIVE_MS || 120000);
@@ -1100,7 +1100,7 @@ function rebuildRuntimeConfig({ log = true } = {}) {
   refreshPaidIndexerTokens();
   TRIAGE_NNTP_CONFIG = buildTriageNntpConfig();
   TRIAGE_MAX_DECODED_BYTES = toPositiveInt(process.env.NZB_TRIAGE_MAX_DECODED_BYTES, 32 * 1024);
-  TRIAGE_NNTP_MAX_CONNECTIONS = toPositiveInt(process.env.NZB_TRIAGE_MAX_CONNECTIONS, 60);
+  TRIAGE_NNTP_MAX_CONNECTIONS = toPositiveInt(process.env.NZB_TRIAGE_MAX_CONNECTIONS, 12);
   TRIAGE_MAX_PARALLEL_NZBS = toPositiveInt(process.env.NZB_TRIAGE_MAX_PARALLEL_NZBS, 16);
   TRIAGE_STAT_SAMPLE_COUNT = toPositiveInt(process.env.NZB_TRIAGE_STAT_SAMPLE_COUNT, 2);
   TRIAGE_ARCHIVE_SAMPLE_COUNT = toPositiveInt(process.env.NZB_TRIAGE_ARCHIVE_SAMPLE_COUNT, 1);
@@ -2815,7 +2815,17 @@ async function streamHandler(req, res) {
     }
 
     if (triagePrewarmPromise) {
-      await triagePrewarmPromise;
+      const prewarmStart = Date.now();
+      console.log('[NZB TRIAGE] Waiting for NNTP pool pre-warm to complete (timeout: 10s)...');
+      const PREWARM_TIMEOUT_MS = 10000;
+      const prewarmSettled = await Promise.race([
+        triagePrewarmPromise.then(() => 'resolved'),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), PREWARM_TIMEOUT_MS)),
+      ]).catch((err) => {
+        console.warn('[NZB TRIAGE] Pre-warm await failed', err?.message || err);
+        return 'error';
+      });
+      console.log(`[NZB TRIAGE] Pre-warm await finished: ${prewarmSettled} (${Date.now() - prewarmStart} ms)`);
       triagePrewarmPromise = null;
     }
 
