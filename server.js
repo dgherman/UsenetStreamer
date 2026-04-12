@@ -877,6 +877,29 @@ function isResultFromPaidIndexer(result) {
   return tokens.some((token) => PAID_INDEXER_TOKENS.has(token));
 }
 
+function normalizeUsenetGroup(value) {
+  if (!value) return '';
+  return String(value).trim().toLowerCase();
+}
+
+function extractUsenetGroup(result) {
+  if (!result || typeof result !== 'object') return '';
+  return normalizeUsenetGroup(
+    result.group
+    || result.groups
+    || result.usenetGroup
+    || result?.release?.group
+  );
+}
+
+function extractFileCount(result) {
+  if (!result || typeof result !== 'object') return Number.POSITIVE_INFINITY;
+  const raw = result.files ?? result.filecount ?? result.fileCount;
+  const parsed = Number(raw);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  return Number.POSITIVE_INFINITY;
+}
+
 function dedupeResultsByTitle(results) {
   if (!Array.isArray(results) || results.length === 0) return [];
   const buckets = new Map();
@@ -898,13 +921,22 @@ function dedupeResultsByTitle(results) {
       deduped.push(result);
       continue;
     }
-    let bucket = buckets.get(normalizedTitle);
+    const usenetGroup = extractUsenetGroup(result);
+    if (!usenetGroup) {
+      // Require a group token for safe duplicate collapsing across indexers.
+      deduped.push(result);
+      continue;
+    }
+
+    const bucketKey = `${normalizedTitle}|${usenetGroup}`;
+    let bucket = buckets.get(bucketKey);
     if (!bucket) {
       bucket = [];
-      buckets.set(normalizedTitle, bucket);
+      buckets.set(bucketKey, bucket);
     }
     const candidatePublish = publishMeta.publishDateMs ?? null;
     const candidateIsPaid = isResultFromPaidIndexer(result);
+    const candidateFiles = extractFileCount(result);
     let matchedEntry = null;
     for (const entry of bucket) {
       if (areReleasesWithinDays(entry.publishDateMs ?? null, candidatePublish ?? null, DEDUPE_MAX_PUBLISH_DIFF_DAYS)) {
@@ -916,6 +948,7 @@ function dedupeResultsByTitle(results) {
       const entry = {
         publishDateMs: candidatePublish,
         isPaid: candidateIsPaid,
+        fileCount: candidateFiles,
         result,
         listIndex: deduped.length,
       };
@@ -926,16 +959,16 @@ function dedupeResultsByTitle(results) {
 
     if (candidateIsPaid && !matchedEntry.isPaid) {
       matchedEntry.isPaid = true;
-      matchedEntry.publishDateMs = candidatePublish;
+      matchedEntry.fileCount = candidateFiles;
       matchedEntry.result = result;
       deduped[matchedEntry.listIndex] = result;
       continue;
     }
 
     if (candidateIsPaid === matchedEntry.isPaid) {
-      const existingPublish = matchedEntry.publishDateMs;
-      if (candidatePublish !== null && (existingPublish === null || candidatePublish > existingPublish)) {
-        matchedEntry.publishDateMs = candidatePublish;
+      const existingFiles = Number.isFinite(matchedEntry.fileCount) ? matchedEntry.fileCount : Number.POSITIVE_INFINITY;
+      if (candidateFiles < existingFiles) {
+        matchedEntry.fileCount = candidateFiles;
         matchedEntry.result = result;
         deduped[matchedEntry.listIndex] = result;
       }
@@ -980,8 +1013,18 @@ function buildNntpServersArray() {
   return [serverUrl];
 }
 
+function deriveSortOrder(rawSortOrder, sortMode) {
+  const explicit = (rawSortOrder || '').trim();
+  if (explicit) return parseCommaList(explicit);
+  switch (sortMode) {
+    case 'language_quality_size': return ['language', 'resolution', 'size'];
+    case 'quality_then_size':    return ['resolution', 'size', 'files'];
+    default:                     return ['resolution', 'size', 'files'];
+  }
+}
+
 let INDEXER_SORT_MODE = normalizeSortMode(process.env.NZB_SORT_MODE, 'quality_then_size');
-let INDEXER_SORT_ORDER = parseCommaList(process.env.NZB_SORT_ORDER);
+let INDEXER_SORT_ORDER = deriveSortOrder(process.env.NZB_SORT_ORDER, INDEXER_SORT_MODE);
 let INDEXER_PREFERRED_LANGUAGES = resolvePreferredLanguages(process.env.NZB_PREFERRED_LANGUAGE, []);
 let INDEXER_PREFERRED_QUALITIES = parseCommaList(process.env.NZB_PREFERRED_QUALITIES);
 let INDEXER_PREFERRED_ENCODES = parseCommaList(process.env.NZB_PREFERRED_ENCODES);
@@ -1147,7 +1190,7 @@ function rebuildRuntimeConfig({ log = true } = {}) {
   });
 
   INDEXER_SORT_MODE = normalizeSortMode(process.env.NZB_SORT_MODE, 'quality_then_size');
-  INDEXER_SORT_ORDER = parseCommaList(process.env.NZB_SORT_ORDER);
+  INDEXER_SORT_ORDER = deriveSortOrder(process.env.NZB_SORT_ORDER, INDEXER_SORT_MODE);
   INDEXER_PREFERRED_LANGUAGES = resolvePreferredLanguages(process.env.NZB_PREFERRED_LANGUAGE, []);
   INDEXER_PREFERRED_QUALITIES = parseCommaList(process.env.NZB_PREFERRED_QUALITIES);
   INDEXER_PREFERRED_ENCODES = parseCommaList(process.env.NZB_PREFERRED_ENCODES);
@@ -2866,9 +2909,7 @@ async function streamHandler(req, res) {
     })();
     const resolvedPreferredLanguages = resolvePreferredLanguages(triageOverrides.preferredLanguages, INDEXER_PREFERRED_LANGUAGES);
     const activeSortMode = triageOverrides.sortMode || INDEXER_SORT_MODE;
-    // Only activate custom_priority sort when NZB_SORT_ORDER is explicitly configured;
-    // otherwise fall back to the existing NZB_SORT_MODE behaviour.
-    const resolvedSortOrder = INDEXER_SORT_ORDER.length > 0 ? INDEXER_SORT_ORDER : [];
+    const resolvedSortOrder = INDEXER_SORT_ORDER;
     const effectiveSortMode = resolvedSortOrder.length > 0 ? 'custom_priority' : activeSortMode;
 
     finalNzbResults = prepareSortedResults(finalNzbResults, {
@@ -3714,6 +3755,9 @@ async function streamHandler(req, res) {
               preferredLanguageMatch: preferredLanguageHit,
               preferredLanguageName: matchedPreferredLanguage,
               preferredLanguageNames: preferredLanguageMatches,
+              files: result.files || undefined,
+              grabs: result.grabs || undefined,
+              group: result.group || undefined,
             }
           };
           
