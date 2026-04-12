@@ -214,7 +214,15 @@ Anything that can load HTTPS manifests and handle `externalPlayer` hints should 
 
 ## 📝 Changelog
 
-### [next] - 2026-04-03
+### [next] - 2026-04-12
+- Upstream sync: NNTP pool hang-up fix — reduce default connections to 12, add 15s acquire timeout and 30s prewarm timeout, require fresh pool on stale builder (upstream 392770c)
+- Upstream sync: security hardening — header allowlist on NZBDav proxy, error URL sanitization, credential masking for admin API, failed-login lockout (10 attempts / 15min), CSRF Origin checking, runtime-env.json file permissions (upstream 3e75d88+e473adc)
+- Upstream sync: extended attributes — request extended=1 from Newznab, parse files/grabs/group/usenetdate, fix Easynews post date field, date/files sort criteria, dedup uses title+group bucket key and prefers fewer-files releases (upstream 004ed78+b8fb0dd+b3ea762)
+- Upstream sync: NZBDav stream caching — HTTP keep-alive agents, file size cache (30min TTL), real HEAD requests instead of GET+Range:0-0 emulation, cached HEAD fast-path, server keepAliveTimeout/headersTimeout (upstream e19c375)
+- Upstream sync: indexer caps filtering — caps infrastructure with per-indexer supportedParams cache, skip indexers missing required ID params (imdbid/tvdbid/tmdbid), filter unsupported tokens from search plans (upstream e6da82e+66e917a)
+- Upstream sync: pin axios to 1.14.0 for reproducible builds (upstream 202145b)
+
+### [prev] - 2026-04-03
 - Fix: mid-stream truncation fallback — corrupt Usenet segments (YENC CRC failures) now mark the download URL in the negative cache so Stremio's automatic retry routes to a fallback NZB instead of hitting the same corrupt file repeatedly
 
 ---
