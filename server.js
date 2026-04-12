@@ -304,11 +304,80 @@ function extractQualityFeatureBadges(title) {
 }
 
 app.use(cors());
+
+// ---------------------------------------------------------------------------
+// Security headers
+// ---------------------------------------------------------------------------
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  next();
+});
+
+// ---------------------------------------------------------------------------
+// Sanitize error messages before sending to clients — strip URLs that could
+// contain internal IPs, API keys, or other sensitive information.
+// ---------------------------------------------------------------------------
+const URL_PATTERN = /https?:\/\/[^\s'"<>)]+/gi;
+function sanitizeErrorForClient(error) {
+  const msg = error?.failureMessage || error?.response?.data?.message || error?.message || 'Internal server error';
+  return msg.replace(URL_PATTERN, '[redacted-url]');
+}
+
 app.use('/assets', express.static(path.join(__dirname, 'assets')));
 
 const adminApiRouter = express.Router();
 adminApiRouter.use(express.json({ limit: '1mb' }));
 const adminStatic = express.static(path.join(__dirname, 'admin'));
+
+// ---------------------------------------------------------------------------
+// Credential masking: sensitive keys are replaced with a sentinel in API
+// responses so plaintext secrets never reach the browser.  On save/test,
+// sentinel values are swapped back to the real process.env value.
+// ---------------------------------------------------------------------------
+const CREDENTIAL_MASK_SENTINEL = '\x00__MASKED__\x00';
+const SENSITIVE_KEYS = new Set([
+  'INDEXER_MANAGER_API_KEY',
+  'NZBDAV_API_KEY',
+  'NZBDAV_WEBDAV_PASS',
+  'NZB_TRIAGE_NNTP_PASS',
+  'EASYNEWS_PASSWORD',
+  'TMDB_API_KEY',
+  'TVDB_API_KEY',
+  'SPECIAL_PROVIDER_SECRET',
+]);
+const SENSITIVE_KEY_PATTERNS = [/^NEWZNAB_API_KEY_\d+$/];
+
+function isSensitiveKey(key) {
+  if (SENSITIVE_KEYS.has(key)) return true;
+  return SENSITIVE_KEY_PATTERNS.some((rx) => rx.test(key));
+}
+
+function maskSensitiveValues(values) {
+  const masked = { ...values };
+  Object.keys(masked).forEach((key) => {
+    if (isSensitiveKey(key) && masked[key]) {
+      masked[key] = CREDENTIAL_MASK_SENTINEL;
+    }
+  });
+  return masked;
+}
+
+function unsentinelValues(values) {
+  if (!values || typeof values !== 'object') return values;
+  const resolved = { ...values };
+  Object.keys(resolved).forEach((key) => {
+    if (resolved[key] === CREDENTIAL_MASK_SENTINEL) {
+      resolved[key] = process.env[key] || '';
+    }
+  });
+  return resolved;
+}
+
+// Keys that cannot be changed via the admin API — only via env/docker/filesystem
+const FROZEN_KEYS = new Set(['ADDON_SHARED_SECRET', 'STREAMING_MODE']);
 
 adminApiRouter.get('/config', (req, res) => {
   const values = collectConfigValues(ADMIN_CONFIG_KEYS);
@@ -319,7 +388,7 @@ adminApiRouter.get('/config', (req, res) => {
     values.TMDB_SEARCH_MODE = 'english_only';
   }
   res.json({
-    values,
+    values: maskSensitiveValues(values),
     manifestUrl: computeManifestUrl(),
     runtimeEnvPath: runtimeEnv.RUNTIME_ENV_FILE,
     debugNewznabSearch: isNewznabDebugEnabled(),
@@ -365,7 +434,11 @@ adminApiRouter.post('/config', async (req, res) => {
 
   ADMIN_CONFIG_KEYS.forEach((key) => {
     if (Object.prototype.hasOwnProperty.call(incoming, key)) {
+      // Never allow frozen keys to be changed via the API
+      if (FROZEN_KEYS.has(key)) return;
       const value = incoming[key];
+      // Skip masked sentinel values — keep existing process.env value unchanged
+      if (value === CREDENTIAL_MASK_SENTINEL) return;
       if (numberedKeySet.has(key)) {
         const trimmed = typeof value === 'string' ? value.trim() : value;
         if (trimmed === '' || trimmed === null || trimmed === undefined) {
@@ -398,8 +471,8 @@ adminApiRouter.post('/config', async (req, res) => {
     updates.TMDB_SEARCH_LANGUAGE = incoming.TMDB_SEARCH_LANGUAGE ? String(incoming.TMDB_SEARCH_LANGUAGE) : '';
   }
 
-  // Safety: ADDON_SHARED_SECRET can never be changed via the API — only via env/docker
-  delete updates.ADDON_SHARED_SECRET;
+  // Safety: frozen keys can never be changed via the API — only via env/docker
+  FROZEN_KEYS.forEach((key) => delete updates[key]);
 
   // Debug: log what we're about to save
   console.log('[ADMIN] TMDb updates to save:', {
@@ -437,7 +510,9 @@ adminApiRouter.post('/config', async (req, res) => {
 
 adminApiRouter.post('/test-connections', async (req, res) => {
   const payload = req.body || {};
-  const { type, values } = payload;
+  const { type } = payload;
+  // Resolve masked sentinel values back to real process.env before testing
+  const values = unsentinelValues(payload.values);
   if (!type || typeof values !== 'object') {
     res.status(400).json({ error: 'Invalid payload: expected "type" and "values"' });
     return;
@@ -3908,12 +3983,10 @@ async function streamHandler(req, res) {
   } catch (error) {
     console.error('[ERROR] Processing failed:', error.message);
     res.status(error.response?.status || 500).json({
-      error: error.response?.data?.message || error.message,
+      error: sanitizeErrorForClient(error),
       details: {
         type,
         id,
-        indexerManager: INDEXER_MANAGER_LABEL,
-        indexerManagerUrl: INDEXER_MANAGER_URL,
         timestamp: new Date().toISOString()
       }
     });
@@ -3953,7 +4026,7 @@ async function handleEasynewsNzbDownload(req, res) {
   } catch (error) {
     const statusCode = /credential|unauthorized|forbidden/i.test(error.message || '') ? 401 : 502;
     console.warn('[EASYNEWS] NZB download failed', error.message || error);
-    res.status(statusCode).json({ error: error.message || 'Unable to fetch Easynews NZB' });
+    res.status(statusCode).json({ error: sanitizeErrorForClient(error) || 'Unable to fetch Easynews NZB' });
   }
 }
 
@@ -4182,7 +4255,7 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
         ? await nzbdavService.streamVideoTypeFailure(req, res, error)
         : await nzbdavService.streamFailureVideo(req, res, error);
       if (!served && !res.headersSent) {
-        res.status(502).json({ error: error.failureMessage || error.message });
+        res.status(502).json({ error: sanitizeErrorForClient(error) });
       } else if (!served) {
         res.end();
       }
@@ -4191,7 +4264,7 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
 
     const statusCode = error.response?.status || 502;
     if (!res.headersSent) {
-      res.status(statusCode).json({ error: error.message });
+      res.status(statusCode).json({ error: sanitizeErrorForClient(error) });
     } else {
       res.end();
     }
