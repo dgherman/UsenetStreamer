@@ -4331,6 +4331,8 @@ function startHttpServer() {
   serverInstance = app.listen(currentPort, SERVER_HOST, () => {
     console.log(`Addon running at http://${SERVER_HOST}:${currentPort}`);
   });
+  serverInstance.keepAliveTimeout = 65000;
+  serverInstance.headersTimeout = 70000;
   serverInstance.on('close', () => {
     serverInstance = null;
   });
