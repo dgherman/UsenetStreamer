@@ -44,7 +44,7 @@ const newznabService = require('./src/services/newznab');
 const easynewsService = require('./src/services/easynews');
 const { toFiniteNumber, toPositiveInt, toNonNegativeInt, toBoolean, parseCommaList, parsePathList, normalizeSortMode, resolvePreferredLanguages, toSizeBytesFromGb, collectConfigValues, computeManifestUrl, stripTrailingSlashes, decodeBase64Value } = require('./src/utils/config');
 const { normalizeReleaseTitle, parseRequestedEpisode, isVideoFileName, fileMatchesEpisode, normalizeNzbdavPath, inferMimeType, normalizeIndexerToken, nzbMatchesIndexer, cleanSpecialSearchTitle, findMatchingHistoryItems } = require('./src/utils/parsers');
-const { sleep, annotateNzbResult, applyMaxSizeFilter, prepareSortedResults, getPreferredLanguageMatch, getPreferredLanguageMatches, triageStatusRank, buildTriageTitleMap, prioritizeTriageCandidates, triageDecisionsMatchStatuses, sanitizeDecisionForCache, serializeFinalNzbResults, restoreFinalNzbResults, safeStat, selectBestRepairCandidate } = require('./src/utils/helpers');
+const { sleep, annotateNzbResult, applyMaxSizeFilter, prepareSortedResults, getPreferredLanguageMatch, getPreferredLanguageMatches, triageStatusRank, buildTriageTitleMap, prioritizeTriageCandidates, triageDecisionsMatchStatuses, sanitizeDecisionForCache, serializeFinalNzbResults, restoreFinalNzbResults, safeStat, selectBestRepairCandidate, formatStreamTitle } = require('./src/utils/helpers');
 const indexerService = require('./src/services/indexer');
 const nzbdavService = require('./src/services/nzbdav');
 const nzbdavWs = require('./src/services/nzbdavWebSocket');
@@ -1033,6 +1033,8 @@ let INDEXER_PREFERRED_VISUAL_TAGS = parseCommaList(process.env.NZB_PREFERRED_VIS
 let INDEXER_PREFERRED_AUDIO_TAGS = parseCommaList(process.env.NZB_PREFERRED_AUDIO_TAGS);
 let INDEXER_PREFERRED_KEYWORDS = parseCommaList(process.env.NZB_PREFERRED_KEYWORDS);
 let INDEXER_DEDUP_ENABLED = toBoolean(process.env.NZB_DEDUP_ENABLED, true);
+let NZB_NAMING_PATTERN = process.env.NZB_NAMING_PATTERN || '';
+let NZB_DISPLAY_NAME_PATTERN = process.env.NZB_DISPLAY_NAME_PATTERN || '';
 let INDEXER_HIDE_BLOCKED_RESULTS = toBoolean(process.env.NZB_HIDE_BLOCKED_RESULTS, false);
 let INDEXER_MAX_RESULT_SIZE_BYTES = toSizeBytesFromGb(
   process.env.NZB_MAX_RESULT_SIZE_GB && process.env.NZB_MAX_RESULT_SIZE_GB !== ''
@@ -1199,6 +1201,8 @@ function rebuildRuntimeConfig({ log = true } = {}) {
   INDEXER_PREFERRED_AUDIO_TAGS = parseCommaList(process.env.NZB_PREFERRED_AUDIO_TAGS);
   INDEXER_PREFERRED_KEYWORDS = parseCommaList(process.env.NZB_PREFERRED_KEYWORDS);
   INDEXER_DEDUP_ENABLED = toBoolean(process.env.NZB_DEDUP_ENABLED, true);
+  NZB_NAMING_PATTERN = process.env.NZB_NAMING_PATTERN || '';
+  NZB_DISPLAY_NAME_PATTERN = process.env.NZB_DISPLAY_NAME_PATTERN || '';
   INDEXER_HIDE_BLOCKED_RESULTS = toBoolean(process.env.NZB_HIDE_BLOCKED_RESULTS, false);
   INDEXER_MAX_RESULT_SIZE_BYTES = toSizeBytesFromGb(
     process.env.NZB_MAX_RESULT_SIZE_GB && process.env.NZB_MAX_RESULT_SIZE_GB !== ''
@@ -1289,6 +1293,8 @@ const ADMIN_CONFIG_KEYS = [
   'NZB_PREFERRED_KEYWORDS',
   'NZB_MAX_RESULT_SIZE_GB',
   'NZB_DEDUP_ENABLED',
+  'NZB_NAMING_PATTERN',
+  'NZB_DISPLAY_NAME_PATTERN',
   'NZB_HIDE_BLOCKED_RESULTS',
   'NZB_BLOCKLIST_PATTERNS',
   'NZB_ALLOWED_RESOLUTIONS',
@@ -3666,7 +3672,142 @@ async function streamHandler(req, res) {
         if (languageLabel) tags.push(`🌐 ${languageLabel}`);
         if (sizeString) tags.push(sizeString);
         const addonLabel = ADDON_NAME || DEFAULT_ADDON_NAME;
-        const name = qualitySummary ? `${addonLabel} ${qualitySummary}` : addonLabel;
+        const tagsString = tags.filter(Boolean).join(' • ');
+
+        const namingContext = {
+          addon: { name: addonLabel },
+          stream: {
+            title: result.parsedTitleDisplay || result.parsedTitle || result.title || '',
+            filename: result.title || '',
+            resolution: detectedResolutionToken || '',
+            source: result.source || '',
+            encode: result.codec || '',
+            visualTags: result.visualTags || result.hdrList || [],
+            audioTags: result.audioList || [],
+            releaseGroup: result.group || '',
+            size: result.size || 0,
+            indexer: result.indexer || '',
+            languages: releaseLanguages.length > 0 ? releaseLanguages : (sourceLanguage ? [sourceLanguage] : []),
+            health: triageTag || '',
+            instant: isInstant,
+            cached: isInstant,
+            files: Number.isFinite(result.files) ? result.files : null,
+            grabs: Number.isFinite(result.grabs) ? result.grabs : null,
+            date: result.publishDateMs ? new Date(result.publishDateMs).toISOString().slice(0, 10) : null,
+            usenetGroup: result.group || null,
+            streamQuality: quality || '',
+            parsedTitleDisplay: result.parsedTitleDisplay || result.parsedTitle || result.title || '',
+          },
+          service: { shortName: 'Usenet', cached: isInstant, instant: isInstant },
+          tags: tagsString,
+          title: result.parsedTitleDisplay || result.parsedTitle || result.title || '',
+          indexer: result.indexer || '',
+          resolution: detectedResolutionToken || '',
+          quality: quality || '',
+          health: triageTag || '',
+          size: result.size || 0,
+          source: result.source || '',
+          codec: result.codec || '',
+          group: result.group || '',
+        };
+
+        const buildPatternFromTokenList = (rawPattern, variant, defaultPattern) => {
+          if (rawPattern && typeof rawPattern === 'string' && rawPattern.includes('{')) {
+            return rawPattern;
+          }
+          const hasLineBreaks = /[\r\n]/.test(String(rawPattern || ''));
+          const normalizedList = String(rawPattern || '')
+            .replace(/\band\b/gi, ',')
+            .replace(/[;|]/g, ',');
+          const tokens = normalizedList
+            .split(',')
+            .map((token) => token.trim())
+            .filter(Boolean);
+          if (!hasLineBreaks && tokens.length === 0) return defaultPattern;
+
+          const shortTokenMap = {
+            addon: '{addon.name}',
+            title: '{stream.title::exists["{stream.title}"||""]}',
+            instant: '{stream.instant::istrue["⚡"||""]}',
+            health: '{stream.health::exists["{stream.health}"||""]}',
+            quality: '{stream.resolution::exists["{stream.resolution}"||""]}',
+            resolution_quality: '{stream.resolution::exists["{stream.resolution}"||""]}',
+            stream_quality: '{stream.streamQuality::exists["{stream.streamQuality}"||""]}',
+            resolution: '{stream.resolution::exists["{stream.resolution}"||""]}',
+            source: '{stream.source::exists["{stream.source}"||""]}',
+            codec: '{stream.encode::exists["{stream.encode}"||""]}',
+            group: '{stream.releaseGroup::exists["{stream.releaseGroup}"||""]}',
+            size: '{stream.size::>0["{stream.size::bytes}"||""]}',
+            languages: '{stream.languages::join(" ")::exists["{stream.languages::join(\\" \\")}"||""]}',
+            indexer: '{stream.indexer::exists["{stream.indexer}"||""]}',
+            filename: '{stream.filename::exists["{stream.filename}"||""]}',
+            tags: '{tags::exists["{tags}"||""]}',
+            files: '{stream.files::exists["{stream.files} files"||""]}',
+            grabs: '{stream.grabs::exists["{stream.grabs} grabs"||""]}',
+            date: '{stream.date::exists["{stream.date}"||""]}',
+          };
+
+          const longTokenMap = {
+            title: '{stream.title::exists["🎬 {stream.title}"||""]}',
+            filename: '{stream.filename::exists["📄 {stream.filename}"||""]}',
+            source: '{stream.source::exists["🎥 {stream.source}"||""]}',
+            codec: '{stream.encode::exists["🎞️ {stream.encode}"||""]}',
+            resolution: '{stream.resolution::exists["🖥️ {stream.resolution}"||""]}',
+            visual: '{stream.visualTags::join(" | ")::exists["📺 {stream.visualTags::join(\\" | \\")}"||""]}',
+            audio: '{stream.audioTags::join(" ")::exists["🎧 {stream.audioTags::join(\\" \\")}"||""]}',
+            group: '{stream.releaseGroup::exists["👥 {stream.releaseGroup}"||""]}',
+            size: '{stream.size::>0["📦 {stream.size::bytes}"||""]}',
+            languages: '{stream.languages::join(" ")::exists["🌎 {stream.languages::join(\\" \\")}"||""]}',
+            indexer: '{stream.indexer::exists["🔎 {stream.indexer}"||""]}',
+            health: '{stream.health::exists["🧪 {stream.health}"||""]}',
+            instant: '{stream.instant::istrue["⚡ Instant"||""]}',
+            files: '{stream.files::exists["📁 {stream.files} files"||""]}',
+            grabs: '{stream.grabs::exists["⬇️ {stream.grabs} grabs"||""]}',
+            date: '{stream.date::exists["📅 {stream.date}"||""]}',
+            quality: '{stream.resolution::exists["🖥️ {stream.resolution}"||""]}',
+            resolution_quality: '{stream.resolution::exists["🖥️ {stream.resolution}"||""]}',
+            stream_quality: '{stream.streamQuality::exists["✨ {stream.streamQuality}"||""]}',
+            tags: '{tags::exists["🏷️ {tags}"||""]}',
+          };
+
+          const tokenMap = variant === 'long' ? longTokenMap : shortTokenMap;
+
+          if (hasLineBreaks) {
+            const lines = String(rawPattern || '').split(/\r?\n/);
+            const lineParts = lines.map((line) => {
+              const normalizedLine = String(line || '')
+                .replace(/\band\b/gi, ',')
+                .replace(/[;|]/g, ',');
+              const lineTokens = normalizedLine
+                .split(',')
+                .map((token) => token.trim())
+                .filter(Boolean);
+              return lineTokens
+                .map((token) => tokenMap[token.toLowerCase()] || null)
+                .filter(Boolean)
+                .join(' ');
+            });
+            const separator = variant === 'long' ? '\n' : ' ';
+            const joined = lineParts.join(separator);
+            if (joined.replace(/\s/g, '') === '') return defaultPattern;
+            return joined;
+          }
+
+          const parts = tokens
+            .map((token) => tokenMap[token.toLowerCase()] || null)
+            .filter(Boolean);
+
+          if (parts.length === 0) return defaultPattern;
+          return parts.join(' ');
+        };
+
+        const effectiveDefaultDescriptionPattern = '{stream.parsedTitleDisplay::exists["{stream.parsedTitleDisplay}\\n"||""]}{stream.resolution::exists["🖥️ {stream.resolution}"||""]}{stream.source::exists[" {stream.source}"||""]}{stream.encode::exists[" {stream.encode}"||""]}{stream.visualTags::join(" ")::exists[" | {stream.visualTags::join(\\" \\")}"||""]}\\n{stream.size::>0["📦 {stream.size::bytes}"||""]}{stream.indexer::exists[" | 🔎 {stream.indexer}"||""]}\\n{stream.health::exists["🧪 {stream.health}"||""]}';
+        const effectiveDescriptionPattern = buildPatternFromTokenList(NZB_NAMING_PATTERN, 'long', effectiveDefaultDescriptionPattern);
+        const formattedTitle = formatStreamTitle(effectiveDescriptionPattern, namingContext, effectiveDefaultDescriptionPattern);
+
+        const effectiveDefaultNamePattern = '{addon.name} {stream.health::exists["{stream.health} "||""]}{stream.instant::istrue["⚡ "||""]}{stream.resolution::exists["{stream.resolution}"||""]}';
+        const effectiveNamePattern = buildPatternFromTokenList(NZB_DISPLAY_NAME_PATTERN, 'short', effectiveDefaultNamePattern);
+        const formattedName = formatStreamTitle(effectiveNamePattern, namingContext, effectiveDefaultNamePattern);
         
         // Build behavior hints based on streaming mode
         let behaviorHints;
@@ -3724,8 +3865,8 @@ async function streamHandler(req, res) {
           // Native mode: Stremio v5 native NZB streaming
           const nntpServers = buildNntpServersArray();
           stream = {
-            name,
-            description: `${result.title}\n${result.indexer} • ${sizeString}\n${tags.filter(Boolean).join(' • ')}`,
+            name: formattedName,
+            description: formattedTitle,
             nzbUrl: result.downloadUrl,
             servers: nntpServers.length > 0 ? nntpServers : undefined,
             url: undefined,
@@ -3735,8 +3876,8 @@ async function streamHandler(req, res) {
         } else {
           // NZBDav mode: WebDAV-based streaming
           stream = {
-            title: `${result.title}\n${tags.filter(Boolean).join(' • ')}\n${result.indexer}`,
-            name,
+            title: formattedTitle,
+            name: formattedName,
             url: streamUrl,
             behaviorHints,
             meta: {
