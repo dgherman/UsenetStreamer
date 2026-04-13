@@ -432,8 +432,15 @@ adminApiRouter.post('/config', async (req, res) => {
       // Never allow frozen keys to be changed via the API
       if (FROZEN_KEYS.has(key)) return;
       const value = incoming[key];
-      // Skip masked sentinel values — keep existing process.env value unchanged
-      if (value === CREDENTIAL_MASK_SENTINEL) return;
+      // Skip masked sentinel values — preserve existing process.env value.
+      // For numbered keys (pre-initialised to null above), we must explicitly
+      // restore the current env value so the null doesn't delete it on save.
+      if (value === CREDENTIAL_MASK_SENTINEL) {
+        if (numberedKeySet.has(key) && process.env[key]) {
+          updates[key] = process.env[key];
+        }
+        return;
+      }
       if (numberedKeySet.has(key)) {
         const trimmed = typeof value === 'string' ? value.trim() : value;
         if (trimmed === '' || trimmed === null || trimmed === undefined) {
