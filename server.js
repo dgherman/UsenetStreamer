@@ -63,13 +63,7 @@ const SERVER_HOST = '0.0.0.0';
 const DEDUPE_MAX_PUBLISH_DIFF_DAYS = 14;
 let PAID_INDEXER_TOKENS = new Set();
 
-const QUALITY_FEATURE_PATTERNS = [
-  { label: 'DV', regex: /\b(dolby\s*vision|dolbyvision|dv)\b/i },
-  { label: 'HDR10+', regex: /hdr10\+/i },
-  { label: 'HDR10', regex: /hdr10(?!\+)/i },
-  { label: 'HDR', regex: /\bhdr\b/i },
-  { label: 'SDR', regex: /\bsdr\b/i },
-];
+const { QUALITY_FEATURE_PATTERNS } = require('./src/services/metadata/releaseParser');
 
 // Configurable blocklist - patterns loaded from NZB_BLOCKLIST_PATTERNS env var
 // Supports: simple substring ("remux"), regex ("/\.iso$/i"), word boundary ("[xxx]")
