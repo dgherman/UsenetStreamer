@@ -321,6 +321,7 @@ function sanitizeErrorForClient(error) {
 }
 
 app.use('/assets', express.static(path.join(__dirname, 'assets')));
+app.use('/admin/lib', express.static(path.join(__dirname, 'src', 'utils')));
 
 const adminApiRouter = express.Router();
 adminApiRouter.use(express.json({ limit: '1mb' }));
