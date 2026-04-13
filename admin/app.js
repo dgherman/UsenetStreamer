@@ -275,13 +275,11 @@
       }
     });
 
-    var inserted = 0;
-    orderedKeys.forEach(function (key, idx) {
+    orderedKeys.forEach(function (key) {
       var def = tokenDefs.find(function (d) { return d.key === key; });
       if (!def) return;
       var enabled = enabledKeys.indexOf(key) !== -1;
       container.appendChild(createTokenRow(key, def.label, def.hint, enabled));
-      inserted++;
       var enabledIdx = enabledKeys.indexOf(key);
       if (enabledIdx !== -1 && lineBreakPositions.indexOf(enabledIdx + 1) !== -1) {
         container.appendChild(createSeparatorRow());
@@ -394,7 +392,7 @@
 
     container.addEventListener('dragleave', function (e) {
       var target = e.target.closest('.token-row');
-      if (target) {
+      if (target && !target.contains(e.relatedTarget)) {
         target.classList.remove('drag-over-above', 'drag-over-below');
       }
     });
