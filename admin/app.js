@@ -47,6 +47,393 @@
   let activeSortOrder = [];
   let loadedSortMode = 'quality_then_size';
 
+  const tokenNameHidden = configForm.querySelector('[data-token-name-hidden]');
+  const tokenDescHidden = configForm.querySelector('[data-token-desc-hidden]');
+  const tokenBuilderName = document.getElementById('tokenBuilderName');
+  const tokenBuilderDesc = document.getElementById('tokenBuilderDesc');
+  const addLineBreakBtn = document.getElementById('addLineBreak');
+  const resetTokenBtn = document.getElementById('resetTokenBuilders');
+  const previewNameEl = document.getElementById('previewName');
+  const previewDescEl = document.getElementById('previewDesc');
+  const streamDisplayBuilders = document.getElementById('streamDisplayBuilders');
+  const streamDisplayRawNotice = document.getElementById('streamDisplayRawNotice');
+  const streamDisplayRawValue = document.getElementById('streamDisplayRawValue');
+
+  const NAME_TOKEN_DEFS = [
+    { key: 'addon', label: 'Addon Name', hint: 'e.g. "UsenetStreamer"' },
+    { key: 'health', label: 'Health', hint: 'e.g. "✓ Healthy"' },
+    { key: 'instant', label: 'Instant', hint: '⚡ when stream is cached' },
+    { key: 'resolution', label: 'Resolution', hint: 'e.g. "2160p"' },
+    { key: 'source', label: 'Source', hint: 'e.g. "BluRay"' },
+    { key: 'codec', label: 'Codec', hint: 'e.g. "x265"' },
+    { key: 'size', label: 'Size', hint: 'e.g. "14.2 GB"' },
+    { key: 'indexer', label: 'Indexer', hint: 'e.g. "NZBGeek"' },
+    { key: 'languages', label: 'Languages', hint: 'e.g. "English French"' },
+    { key: 'group', label: 'Release Group', hint: 'e.g. "FraMeSToR"' },
+    { key: 'quality', label: 'Quality', hint: 'e.g. "2160p" (alias for resolution)' },
+  ];
+
+  const DESC_TOKEN_DEFS = [
+    { key: 'title', label: '🎬 Title', hint: 'Parsed release title — e.g. "The Batman 2022"' },
+    { key: 'filename', label: '📄 Filename', hint: 'Raw release filename' },
+    { key: 'resolution', label: '🖥️ Resolution', hint: 'e.g. "2160p"' },
+    { key: 'source', label: '🎥 Source', hint: 'e.g. "BluRay", "WEB-DL"' },
+    { key: 'codec', label: '🎞️ Codec', hint: 'e.g. "x265", "H.264"' },
+    { key: 'visual', label: '📺 Visual Tags', hint: 'e.g. "HDR DV"' },
+    { key: 'audio', label: '🎧 Audio', hint: 'e.g. "DTS-HD MA"' },
+    { key: 'group', label: '👥 Release Group', hint: 'e.g. "FraMeSToR"' },
+    { key: 'size', label: '📦 Size', hint: 'e.g. "14.2 GB"' },
+    { key: 'languages', label: '🌎 Languages', hint: 'e.g. "English French"' },
+    { key: 'indexer', label: '🔎 Indexer', hint: 'e.g. "NZBGeek"' },
+    { key: 'health', label: '🧪 Health', hint: 'e.g. "✓ Healthy"' },
+    { key: 'instant', label: '⚡ Instant', hint: 'Shows when stream is cached' },
+    { key: 'files', label: '📁 Files', hint: 'e.g. "12 files"' },
+    { key: 'grabs', label: '⬇️ Grabs', hint: 'e.g. "847 grabs"' },
+    { key: 'date', label: '📅 Date', hint: 'e.g. "2026-04-10"' },
+    { key: 'tags', label: '🏷️ Tags', hint: 'Combined status/language/size tags' },
+  ];
+
+  const DEFAULT_NAME_TOKENS = ['addon', 'health', 'instant', 'resolution'];
+  const DEFAULT_DESC_PATTERN = 'title\nresolution,source,codec,visual\nsize,indexer\nhealth';
+
+  const SHORT_TOKEN_MAP = {
+    addon: '{addon.name}',
+    title: '{stream.title::exists["{stream.title}"||""]}',
+    instant: '{stream.instant::istrue["⚡"||""]}',
+    health: '{stream.health::exists["{stream.health}"||""]}',
+    quality: '{stream.resolution::exists["{stream.resolution}"||""]}',
+    resolution: '{stream.resolution::exists["{stream.resolution}"||""]}',
+    source: '{stream.source::exists["{stream.source}"||""]}',
+    codec: '{stream.encode::exists["{stream.encode}"||""]}',
+    group: '{stream.releaseGroup::exists["{stream.releaseGroup}"||""]}',
+    size: '{stream.size::>0["{stream.size::bytes}"||""]}',
+    languages: '{stream.languages::join(" ")::exists["{stream.languages::join(\\" \\")}"||""]}',
+    indexer: '{stream.indexer::exists["{stream.indexer}"||""]}',
+    filename: '{stream.filename::exists["{stream.filename}"||""]}',
+    tags: '{tags::exists["{tags}"||""]}',
+    files: '{stream.files::exists["{stream.files} files"||""]}',
+    grabs: '{stream.grabs::exists["{stream.grabs} grabs"||""]}',
+    date: '{stream.date::exists["{stream.date}"||""]}',
+  };
+
+  const LONG_TOKEN_MAP = {
+    title: '{stream.title::exists["🎬 {stream.title}"||""]}',
+    filename: '{stream.filename::exists["📄 {stream.filename}"||""]}',
+    source: '{stream.source::exists["🎥 {stream.source}"||""]}',
+    codec: '{stream.encode::exists["🎞️ {stream.encode}"||""]}',
+    resolution: '{stream.resolution::exists["🖥️ {stream.resolution}"||""]}',
+    visual: '{stream.visualTags::join(" | ")::exists["📺 {stream.visualTags::join(\\" | \\")}"||""]}',
+    audio: '{stream.audioTags::join(" ")::exists["🎧 {stream.audioTags::join(\\" \\")}"||""]}',
+    group: '{stream.releaseGroup::exists["👥 {stream.releaseGroup}"||""]}',
+    size: '{stream.size::>0["📦 {stream.size::bytes}"||""]}',
+    languages: '{stream.languages::join(" ")::exists["🌎 {stream.languages::join(\\" \\")}"||""]}',
+    indexer: '{stream.indexer::exists["🔎 {stream.indexer}"||""]}',
+    health: '{stream.health::exists["🧪 {stream.health}"||""]}',
+    instant: '{stream.instant::istrue["⚡ Instant"||""]}',
+    files: '{stream.files::exists["📁 {stream.files} files"||""]}',
+    grabs: '{stream.grabs::exists["⬇️ {stream.grabs} grabs"||""]}',
+    date: '{stream.date::exists["📅 {stream.date}"||""]}',
+    quality: '{stream.resolution::exists["🖥️ {stream.resolution}"||""]}',
+    tags: '{tags::exists["🏷️ {tags}"||""]}',
+  };
+
+  const PREVIEW_DATA = {
+    addon: { name: 'UsenetStreamer' },
+    stream: {
+      title: 'The Batman 2022',
+      resolution: '2160p',
+      source: 'BluRay',
+      encode: 'x265',
+      visualTags: ['HDR', 'DV'],
+      audioTags: ['DTS-HD MA'],
+      releaseGroup: 'FraMeSToR',
+      size: 15032385536,
+      indexer: 'NZBGeek',
+      health: '✓ Healthy',
+      instant: true,
+      files: 1,
+      grabs: 847,
+      date: '2026-04-10',
+      streamQuality: '2160p',
+      parsedTitleDisplay: 'The Batman 2022',
+      languages: ['English'],
+      filename: 'The.Batman.2022.2160p.UHD.BluRay.x265.HDR.DV.DTS-HD.MA.7.1-FraMeSToR.nzb',
+    },
+    tags: '✓ Healthy • ⚡ Instant • 14.2 GB',
+    title: 'The Batman 2022',
+    indexer: 'NZBGeek',
+    resolution: '2160p',
+    quality: '2160p',
+    health: '✓ Healthy',
+    size: 15032385536,
+    source: 'BluRay',
+    codec: 'x265',
+    group: 'FraMeSToR',
+  };
+
+  function createTokenRow(tokenKey, label, hint, enabled) {
+    const row = document.createElement('div');
+    row.className = 'token-row' + (enabled ? '' : ' disabled');
+    row.draggable = true;
+    row.dataset.tokenKey = tokenKey;
+    row.innerHTML =
+      '<span class="drag-handle">⋮⋮</span>' +
+      '<div class="token-info">' +
+        '<div class="token-label">' + label + '</div>' +
+        '<div class="token-hint">' + hint + '</div>' +
+      '</div>' +
+      '<label class="token-toggle">' +
+        '<input type="checkbox"' + (enabled ? ' checked' : '') + ' />' +
+        '<span class="toggle-track"></span>' +
+        '<span class="toggle-thumb"></span>' +
+      '</label>';
+    const checkbox = row.querySelector('input[type="checkbox"]');
+    checkbox.addEventListener('change', function () {
+      row.classList.toggle('disabled', !this.checked);
+      syncTokenBuilders();
+    });
+    return row;
+  }
+
+  function createSeparatorRow() {
+    const row = document.createElement('div');
+    row.className = 'token-row separator';
+    row.draggable = true;
+    row.dataset.separator = 'true';
+    row.innerHTML =
+      '<span class="drag-handle">⋮⋮</span>' +
+      '<span class="separator-label">── LINE BREAK ──</span>' +
+      '<button type="button" class="separator-remove">✕</button>';
+    row.querySelector('.separator-remove').addEventListener('click', function () {
+      row.remove();
+      syncTokenBuilders();
+    });
+    return row;
+  }
+
+  function serializeBuilder(container) {
+    const rows = Array.from(container.children);
+    const lines = [];
+    let currentLine = [];
+    for (const row of rows) {
+      if (row.dataset.separator) {
+        if (currentLine.length > 0) {
+          lines.push(currentLine.join(','));
+          currentLine = [];
+        }
+        continue;
+      }
+      const checkbox = row.querySelector('input[type="checkbox"]');
+      if (checkbox && checkbox.checked) {
+        currentLine.push(row.dataset.tokenKey);
+      }
+    }
+    if (currentLine.length > 0) {
+      lines.push(currentLine.join(','));
+    }
+    return lines.join('\n');
+  }
+
+  function buildPatternFromTokens(serialized, tokenMap) {
+    if (!serialized) return '';
+    const lines = serialized.split('\n');
+    const patternLines = lines.map(function (line) {
+      var tokens = line.split(',').map(function (t) { return t.trim(); }).filter(Boolean);
+      return tokens.map(function (t) { return tokenMap[t] || null; }).filter(Boolean).join(' ');
+    });
+    return patternLines.join('\n');
+  }
+
+  function populateBuilder(container, tokenDefs, serialized) {
+    container.innerHTML = '';
+    var enabledKeys = [];
+    var lineBreakPositions = [];
+
+    if (serialized) {
+      var lines = serialized.split('\n');
+      for (var li = 0; li < lines.length; li++) {
+        var tokens = lines[li].split(',').map(function (t) { return t.trim(); }).filter(Boolean);
+        enabledKeys = enabledKeys.concat(tokens);
+        if (li < lines.length - 1) {
+          lineBreakPositions.push(enabledKeys.length);
+        }
+      }
+    }
+
+    var orderedKeys = [];
+    var seen = {};
+    enabledKeys.forEach(function (k) {
+      if (!seen[k] && tokenDefs.some(function (d) { return d.key === k; })) {
+        orderedKeys.push(k);
+        seen[k] = true;
+      }
+    });
+    tokenDefs.forEach(function (d) {
+      if (!seen[d.key]) {
+        orderedKeys.push(d.key);
+        seen[d.key] = true;
+      }
+    });
+
+    var inserted = 0;
+    orderedKeys.forEach(function (key, idx) {
+      var def = tokenDefs.find(function (d) { return d.key === key; });
+      if (!def) return;
+      var enabled = enabledKeys.indexOf(key) !== -1;
+      container.appendChild(createTokenRow(key, def.label, def.hint, enabled));
+      inserted++;
+      var enabledIdx = enabledKeys.indexOf(key);
+      if (enabledIdx !== -1 && lineBreakPositions.indexOf(enabledIdx + 1) !== -1) {
+        container.appendChild(createSeparatorRow());
+      }
+    });
+  }
+
+  function syncTokenBuilders() {
+    if (!tokenBuilderName || !tokenBuilderDesc) return;
+
+    var nameSerialized = serializeBuilder(tokenBuilderName);
+    var descSerialized = serializeBuilder(tokenBuilderDesc);
+
+    if (tokenNameHidden) tokenNameHidden.value = nameSerialized;
+    if (tokenDescHidden) tokenDescHidden.value = descSerialized;
+
+    updateTokenPreview(nameSerialized, descSerialized);
+  }
+
+  function updateTokenPreview(nameSerialized, descSerialized) {
+    if (!previewNameEl || !previewDescEl) return;
+    if (typeof window.TemplateEngine === 'undefined') {
+      previewNameEl.textContent = nameSerialized || '';
+      previewDescEl.textContent = descSerialized || '';
+      return;
+    }
+    var namePattern = buildPatternFromTokens(nameSerialized, SHORT_TOKEN_MAP);
+    var descPattern = buildPatternFromTokens(descSerialized, LONG_TOKEN_MAP);
+
+    var nameEngine = new window.TemplateEngine(PREVIEW_DATA);
+    var descEngine = new window.TemplateEngine(PREVIEW_DATA);
+
+    previewNameEl.textContent = namePattern ? nameEngine.render(namePattern) : '';
+    var descResult = descPattern ? descEngine.render(descPattern) : '';
+    previewDescEl.innerHTML = descResult.split('\n').map(function (line) {
+      return line.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }).join('<br>');
+  }
+
+  function applyTokenBuildersFromHidden() {
+    if (!tokenBuilderName || !tokenBuilderDesc) return;
+
+    var nameVal = tokenNameHidden ? tokenNameHidden.value : '';
+    var descVal = tokenDescHidden ? tokenDescHidden.value : '';
+
+    var isRawName = nameVal.indexOf('{') !== -1;
+    var isRawDesc = descVal.indexOf('{') !== -1;
+
+    if (isRawName || isRawDesc) {
+      if (streamDisplayBuilders) streamDisplayBuilders.classList.add('hidden');
+      if (streamDisplayRawNotice) {
+        streamDisplayRawNotice.classList.remove('hidden');
+        if (streamDisplayRawValue) {
+          streamDisplayRawValue.textContent = isRawName ? nameVal : descVal;
+        }
+      }
+      return;
+    }
+
+    if (streamDisplayBuilders) streamDisplayBuilders.classList.remove('hidden');
+    if (streamDisplayRawNotice) streamDisplayRawNotice.classList.add('hidden');
+
+    populateBuilder(tokenBuilderName, NAME_TOKEN_DEFS, nameVal || DEFAULT_NAME_TOKENS.join(','));
+    populateBuilder(tokenBuilderDesc, DESC_TOKEN_DEFS, descVal || DEFAULT_DESC_PATTERN);
+
+    syncTokenBuilders();
+  }
+
+  function resetTokenBuildersToDefaults() {
+    if (tokenNameHidden) tokenNameHidden.value = '';
+    if (tokenDescHidden) tokenDescHidden.value = '';
+    populateBuilder(tokenBuilderName, NAME_TOKEN_DEFS, DEFAULT_NAME_TOKENS.join(','));
+    populateBuilder(tokenBuilderDesc, DESC_TOKEN_DEFS, DEFAULT_DESC_PATTERN);
+    syncTokenBuilders();
+  }
+
+  function initTokenDragAndDrop(container) {
+    var draggedRow = null;
+
+    container.addEventListener('dragstart', function (e) {
+      var row = e.target.closest('.token-row');
+      if (!row || !container.contains(row)) return;
+      draggedRow = row;
+      row.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', '');
+    });
+
+    container.addEventListener('dragover', function (e) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      if (!draggedRow) return;
+
+      var rows = Array.from(container.querySelectorAll('.token-row'));
+      rows.forEach(function (r) {
+        r.classList.remove('drag-over-above', 'drag-over-below');
+      });
+
+      var target = e.target.closest('.token-row');
+      if (!target || target === draggedRow || !container.contains(target)) return;
+
+      var rect = target.getBoundingClientRect();
+      var midY = rect.top + rect.height / 2;
+      if (e.clientY < midY) {
+        target.classList.add('drag-over-above');
+      } else {
+        target.classList.add('drag-over-below');
+      }
+    });
+
+    container.addEventListener('dragleave', function (e) {
+      var target = e.target.closest('.token-row');
+      if (target) {
+        target.classList.remove('drag-over-above', 'drag-over-below');
+      }
+    });
+
+    container.addEventListener('drop', function (e) {
+      e.preventDefault();
+      if (!draggedRow) return;
+
+      var rows = Array.from(container.querySelectorAll('.token-row'));
+      rows.forEach(function (r) {
+        r.classList.remove('drag-over-above', 'drag-over-below');
+      });
+
+      var target = e.target.closest('.token-row');
+      if (!target || target === draggedRow || !container.contains(target)) return;
+
+      var rect = target.getBoundingClientRect();
+      var midY = rect.top + rect.height / 2;
+      if (e.clientY < midY) {
+        container.insertBefore(draggedRow, target);
+      } else {
+        container.insertBefore(draggedRow, target.nextSibling);
+      }
+
+      syncTokenBuilders();
+    });
+
+    container.addEventListener('dragend', function () {
+      if (draggedRow) {
+        draggedRow.classList.remove('dragging');
+        draggedRow = null;
+      }
+      var rows = Array.from(container.querySelectorAll('.token-row'));
+      rows.forEach(function (r) {
+        r.classList.remove('drag-over-above', 'drag-over-below');
+      });
+    });
+  }
+
   const MAX_NEWZNAB_INDEXERS = 20;
   const NEWZNAB_SUFFIXES = ['ENDPOINT', 'API_KEY', 'API_PATH', 'NAME', 'INDEXER_ENABLED', 'PAID', 'PAID_LIMIT', 'ZYCLOPS'];
   const SUPPORTED_SORT_KEYS = ['language', 'release_group', 'size', 'resolution', 'quality', 'encode', 'visual_tag', 'audio_tag', 'keyword'];
@@ -806,6 +1193,7 @@
       applyLanguageSelectionsFromHidden();
       applyQualitySelectionsFromHidden();
       applySortOrderFromHidden();
+      applyTokenBuildersFromHidden();
       applyTmdbLanguageSelectionsFromHidden();
       refreshNewznabFieldNames();
       syncHealthControls();
@@ -1547,6 +1935,22 @@
   if (easynewsPassInput) {
     easynewsPassInput.addEventListener('input', syncSaveGuard);
   }
+
+  if (addLineBreakBtn) {
+    addLineBreakBtn.addEventListener('click', function () {
+      if (tokenBuilderDesc) {
+        tokenBuilderDesc.appendChild(createSeparatorRow());
+        syncTokenBuilders();
+      }
+    });
+  }
+
+  if (resetTokenBtn) {
+    resetTokenBtn.addEventListener('click', resetTokenBuildersToDefaults);
+  }
+
+  if (tokenBuilderName) initTokenDragAndDrop(tokenBuilderName);
+  if (tokenBuilderDesc) initTokenDragAndDrop(tokenBuilderDesc);
 
   const pathToken = extractTokenFromPath();
   if (pathToken) {
