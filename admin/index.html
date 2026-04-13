@@ -11,6 +11,7 @@
   <link rel="apple-touch-icon" href="/assets/icon.png" />
   <link rel="icon" href="/assets/icon.png" type="image/png" />
   <link rel="stylesheet" href="styles.css" />
+  <script src="lib/templateEngine.js"></script>
 </head>
 <body>
   <main class="container">
@@ -553,6 +554,46 @@
           <div class="inline-actions">
             <button type="button" class="secondary" data-test="tmdb">Test TMDb Connection</button>
             <span class="status-message" data-test-status="tmdb"></span>
+          </div>
+        </section>
+
+        <section class="group" id="streamDisplayGroup">
+          <h3>Stream Display</h3>
+          <p class="hint">Customize how streams appear in Stremio. Drag to reorder, toggle to include/exclude. Insert line breaks to control multi-line layout. Changes are reflected in the preview below.</p>
+
+          <div id="streamDisplayRawNotice" class="token-raw-notice hidden">
+            Custom template detected — visual builder is disabled.<code id="streamDisplayRawValue"></code>
+          </div>
+
+          <div id="streamDisplayBuilders">
+            <input type="hidden" name="NZB_DISPLAY_NAME_PATTERN" data-token-name-hidden />
+            <input type="hidden" name="NZB_NAMING_PATTERN" data-token-desc-hidden />
+
+            <div class="token-section-label">Stream Name <span class="token-section-subtitle">(bold label in Stremio)</span></div>
+            <div class="token-builder" id="tokenBuilderName" data-builder="name"></div>
+
+            <div style="margin-top: 16px;">
+              <div class="token-section-label">Stream Description <span class="token-section-subtitle">(multi-line body)</span></div>
+              <div class="token-builder" id="tokenBuilderDesc" data-builder="desc"></div>
+              <div class="token-builder-actions">
+                <button type="button" id="addLineBreak">+ Add Line Break</button>
+              </div>
+            </div>
+
+            <div style="margin-top: 16px;">
+              <div class="token-section-label">Live Preview</div>
+              <div class="token-preview">
+                <div class="preview-sublabel">Name</div>
+                <div class="preview-name" id="previewName"></div>
+                <div class="preview-sublabel">Description</div>
+                <div class="preview-description" id="previewDesc"></div>
+              </div>
+              <div class="token-preview-hint">Preview uses sample data. Actual values depend on the release.</div>
+            </div>
+
+            <div class="token-reset">
+              <button type="button" id="resetTokenBuilders">Reset to Defaults</button>
+            </div>
           </div>
         </section>
 
