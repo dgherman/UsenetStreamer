@@ -1,4 +1,5 @@
-const parseTorrentTitle = require('parse-torrent-title');
+const _ptt = require('parse-torrent-title');
+const parseTorrentTitle = typeof _ptt === 'function' ? _ptt : _ptt.parse;
 
 const LANGUAGE_FILTERS = [
   'English',
@@ -146,6 +147,14 @@ const QUALITY_SCORE_MAP = RESOLUTION_PREFERENCES.reduce((acc, label, index) => {
   return acc;
 }, {});
 
+const QUALITY_FEATURE_PATTERNS = [
+  { label: 'DV', regex: /\b(dolby\s*vision|dolbyvision|dv)\b/i },
+  { label: 'HDR10+', regex: /hdr10\+/i },
+  { label: 'HDR10', regex: /hdr10(?!\+)/i },
+  { label: 'HDR', regex: /\bhdr\b/i },
+  { label: 'SDR', regex: /\bsdr\b/i },
+];
+
 function buildLanguagePattern(token) {
   if (token instanceof RegExp) return token;
   const normalized = token.trim().toLowerCase();
@@ -228,16 +237,46 @@ function parseReleaseMetadata(title) {
   const qualityLabel = parsed.quality || parsed.source || parsed.codec || null;
   const qualityScore = QUALITY_SCORE_MAP[resolution] || 0;
 
+  const parsedTitle = (parsed.title && parsed.title.trim()) ? parsed.title : null;
+  const parsedYear = parsed.year ? parseInt(parsed.year, 10) || null : null;
+  const parsedSeason = parsed.season != null ? parsed.season : (Array.isArray(parsed.seasons) ? parsed.seasons[0] || null : null);
+  const parsedEpisode = parsed.episode != null ? parsed.episode : (Array.isArray(parsed.episodes) ? parsed.episodes[0] || null : null);
+  let parsedTitleDisplay = parsedTitle;
+  if (parsedTitle) {
+    if (Number.isFinite(parsedSeason) && Number.isFinite(parsedEpisode)) {
+      parsedTitleDisplay = `${parsedTitle} S${String(parsedSeason).padStart(2, '0')}E${String(parsedEpisode).padStart(2, '0')}`;
+    } else if (Number.isFinite(parsedYear)) {
+      parsedTitleDisplay = `${parsedTitle} ${parsedYear}`;
+    }
+  }
+
   return {
+    parsedTitle,
+    parsedTitleDisplay,
     resolution,
     languages,
     qualityLabel,
     qualityScore,
+    codec: parsed.codec || null,
+    source: parsed.source || null,
+    group: parsed.group || null,
+    season: parsedSeason,
+    episode: parsedEpisode,
+    year: parsedYear,
+    container: parsed.container || null,
+    audio: Array.isArray(parsed.audio) ? parsed.audio[0] : (parsed.audio || null),
+    audioList: Array.isArray(parsed.audio) ? parsed.audio : (parsed.audio ? [parsed.audio] : []),
+    hdr: Array.isArray(parsed.hdr) && parsed.hdr.length > 0,
+    hdrList: Array.isArray(parsed.hdr) ? parsed.hdr : [],
+    visualTags: QUALITY_FEATURE_PATTERNS
+      .filter(({ regex }) => regex.test(rawTitle))
+      .map(({ label }) => label),
   };
 }
 
 module.exports = {
   LANGUAGE_FILTERS,
   LANGUAGE_SYNONYMS,
+  QUALITY_FEATURE_PATTERNS,
   parseReleaseMetadata,
 };
