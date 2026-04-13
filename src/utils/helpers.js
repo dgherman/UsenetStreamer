@@ -1,6 +1,7 @@
 // Helper utilities for sorting, filtering, and processing results
 const { parseReleaseMetadata } = require('../services/metadata/releaseParser');
 const { normalizeReleaseTitle } = require('./parsers');
+const TemplateEngine = require('./templateEngine');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -601,8 +602,18 @@ function selectBestRepairCandidate(viable, { type = 'movie', allowedResolutions 
   return sorted[0] ?? null;
 }
 
+function formatStreamTitle(pattern, data, defaultPattern = '{title}') {
+  let effectivePattern = (pattern && typeof pattern === 'string' && pattern.trim().length > 0)
+    ? pattern
+    : defaultPattern;
+
+  const engine = new TemplateEngine(data);
+  return engine.render(effectivePattern);
+}
+
 module.exports = {
   sleep,
+  formatStreamTitle,
   annotateNzbResult,
   applyMaxSizeFilter,
   filterByAllowedResolutions,
