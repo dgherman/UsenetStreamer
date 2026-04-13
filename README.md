@@ -222,6 +222,7 @@ Anything that can load HTTPS manifests and handle `externalPlayer` hints should 
 - Upstream sync: indexer caps filtering — caps infrastructure with per-indexer supportedParams cache, skip indexers missing required ID params (imdbid/tvdbid/tmdbid), filter unsupported tokens from search plans (upstream e6da82e+66e917a)
 - Upstream sync: pin axios to 1.14.0 for reproducible builds (upstream 202145b)
 - Feature: configurable stream naming template system — rich multi-line Stremio stream cards with resolution, source, codec, visual tags, size, indexer, and health status; customizable via NZB_NAMING_PATTERN and NZB_DISPLAY_NAME_PATTERN env vars
+- Feature: visual stream display builder in admin dashboard — drag-and-drop token ordering, enable/disable toggles, line break separators, and live preview for stream naming pattern configuration
 
 ### [prev] - 2026-04-03
 - Fix: mid-stream truncation fallback — corrupt Usenet segments (YENC CRC failures) now mark the download URL in the negative cache so Stremio's automatic retry routes to a fallback NZB instead of hitting the same corrupt file repeatedly
