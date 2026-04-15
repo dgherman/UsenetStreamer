@@ -1097,14 +1097,7 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
 
   const sanitizedFileName = derivedFileName.replace(/[\\/:*?"<>|]+/g, '_') || 'stream';
 
-  // Forward Range header, but strip "bytes=0-" (entire file) — sending it causes
-  // nzbdav2 to return 200 with Content-Range, which we then fix to 206.  Players
-  // (Stremio/VLC) treat the 206 as partial content and enter a probe-then-restart
-  // cycle that causes a visible ~40s skip.  Dropping the header makes nzbdav2
-  // return a clean 200 with Content-Length, which players handle as a normal download.
-  const isFullFileRange = /^bytes=0-$/i.test(req.headers.range || '');
-  if (req.headers.range && !isFullFileRange) headers.Range = req.headers.range;
-  if (isFullFileRange) console.log('[NZBDAV] Stripped full-file Range: bytes=0- (forwarding as plain GET)');
+  if (req.headers.range) headers.Range = req.headers.range;
   if (req.headers['if-range']) headers['If-Range'] = req.headers['if-range'];
   if (req.headers.accept) headers.Accept = req.headers.accept;
   if (req.headers['accept-language']) headers['Accept-Language'] = req.headers['accept-language'];
