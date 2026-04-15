@@ -184,7 +184,11 @@ function ensureStreamToken(req, res, next) {
   if (!token) { next(); return; }
   if (req.method === 'OPTIONS') { next(); return; }
 
-  if (!rateLimitCheck(req)) {
+  // Exempt active stream requests from rate limiting — Stremio fires many
+  // rapid range requests (probe, buffer, resume) that easily exceed 60/min.
+  // These are already gated by the stream token check below.
+  const isStreamRequest = (req.path || '').includes('/nzb/stream');
+  if (!isStreamRequest && !rateLimitCheck(req)) {
     res.status(429).json({ error: 'Too many requests — try again later' });
     return;
   }
