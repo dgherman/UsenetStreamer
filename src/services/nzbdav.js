@@ -1177,13 +1177,22 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
     };
   }
 
+  // Parse requested Range start for Content-Range mismatch detection.
+  // nzbdav2 sometimes returns data from the wrong byte offset during
+  // concurrent RAR-extracted file access — we detect and retry once.
+  let requestedRangeStart = null;
+  if (headers.Range) {
+    const rangeStartMatch = headers.Range.match(/bytes=(\d+)-/);
+    if (rangeStartMatch) requestedRangeStart = Number(rangeStartMatch[1]);
+  }
+
   const rangeInfo = headers.Range ? ` [Range: ${headers.Range}]` : ' [no Range]';
   console.log(`[NZBDAV] Proxying ${proxiedMethod} ${targetUrl}${rangeInfo}`);
 
-  const nzbdavResponse = await axios.request(requestConfig);
+  let nzbdavResponse = await axios.request(requestConfig);
 
   let responseStatus = nzbdavResponse.status;
-  const responseHeadersLower = Object.keys(nzbdavResponse.headers || {}).reduce((map, key) => {
+  let responseHeadersLower = Object.keys(nzbdavResponse.headers || {}).reduce((map, key) => {
     map[key.toLowerCase()] = nzbdavResponse.headers[key];
     return map;
   }, {});
@@ -1191,6 +1200,51 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
   let incomingContentRange = responseHeadersLower['content-range'];
   const upstreamCL = responseHeadersLower['content-length'];
   console.log(`[NZBDAV] Upstream responded ${responseStatus}${incomingContentRange ? ` Content-Range: ${incomingContentRange}` : ''}${upstreamCL ? ` Content-Length: ${upstreamCL}` : ''}`);
+
+  // Detect Content-Range mismatch and retry once
+  if (requestedRangeStart !== null && incomingContentRange) {
+    const crMatch = incomingContentRange.match(/bytes\s+(\d+)-/i);
+    if (crMatch) {
+      const upstreamStart = Number(crMatch[1]);
+      if (Number.isFinite(upstreamStart) && upstreamStart !== requestedRangeStart) {
+        console.warn(
+          `[NZBDAV] Content-Range MISMATCH! Requested start=${requestedRangeStart}, got start=${upstreamStart}. Destroying stream and retrying...`
+        );
+        if (nzbdavResponse.data && typeof nzbdavResponse.data.destroy === 'function') {
+          nzbdavResponse.data.destroy();
+        }
+        // Brief pause to let nzbdav2 release RAR extraction state
+        await new Promise((r) => setTimeout(r, 500));
+
+        nzbdavResponse = await axios.request(requestConfig);
+        responseStatus = nzbdavResponse.status;
+        responseHeadersLower = Object.keys(nzbdavResponse.headers || {}).reduce((map, key) => {
+          map[key.toLowerCase()] = nzbdavResponse.headers[key];
+          return map;
+        }, {});
+        incomingContentRange = responseHeadersLower['content-range'];
+
+        // Verify retry
+        if (incomingContentRange) {
+          const retryMatch = incomingContentRange.match(/bytes\s+(\d+)-/i);
+          if (retryMatch) {
+            const retryStart = Number(retryMatch[1]);
+            if (Number.isFinite(retryStart) && retryStart !== requestedRangeStart) {
+              console.error(
+                `[NZBDAV] Content-Range mismatch PERSISTS after retry! Requested=${requestedRangeStart}, got=${retryStart}. Returning 502.`
+              );
+              if (nzbdavResponse.data && typeof nzbdavResponse.data.destroy === 'function') {
+                nzbdavResponse.data.destroy();
+              }
+              res.status(502).send('Upstream returned data from wrong byte offset');
+              return;
+            }
+          }
+        }
+        console.log(`[NZBDAV] Retry succeeded — Content-Range now matches requested range`);
+      }
+    }
+  }
 
   if (incomingContentRange && responseStatus === 200) {
     responseStatus = 206;
