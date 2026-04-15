@@ -4487,6 +4487,12 @@ async function handleNzbdavStream(req, res, internalDownloadUrlOrNext = null, in
       return;
     }
 
+    // Pre-fetch head+tail 64KB probe data so Stremio's probe requests are
+    // served from memory, avoiding concurrent RAR extraction in nzbdav2
+    if (Number.isFinite(streamData.size)) {
+      await nzbdavService.prefetchProbeData(streamData.viewPath, streamData.size);
+    }
+
     await nzbdavService.proxyNzbdavStream(req, res, streamData.viewPath, streamData.fileName || '');
     // Successful stream — reset episode attempt counter
     if (episodeKey) {

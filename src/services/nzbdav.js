@@ -69,40 +69,128 @@ function setCachedFileSize(urlKey, size) {
   }
 }
 
-// Per-viewPath request setup serialization.
-// nzbdav2 corrupts data when concurrent Range requests hit the same RAR-extracted
-// file (the RAR extraction read pointer gets confused). This lock serializes the
-// request *setup* phase — from sending the request to receiving response headers.
-// Once headers arrive, the lock is released and data can flow concurrently.
-const viewPathLocks = new Map();
-const VIEWPATH_LOCK_TIMEOUT_MS = 15000;
+// Probe data cache: pre-fetch and cache the first/last 64KB of each file
+// so that Stremio's MKV probe requests are served from memory instead of
+// hitting nzbdav2 concurrently with the main stream. This eliminates the
+// concurrent RAR extraction that corrupts data in nzbdav2.
+const probeDataCache = new Map();
+const PROBE_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const PROBE_CHUNK_SIZE = 65536; // 64KB — matches Stremio's probe size
 
-async function withViewPathSetupLock(viewPath, fn) {
-  if (!viewPathLocks.has(viewPath)) {
-    viewPathLocks.set(viewPath, Promise.resolve());
+function cleanupProbeCache() {
+  const now = Date.now();
+  for (const [key, entry] of probeDataCache) {
+    if (entry.expiresAt < now) probeDataCache.delete(key);
   }
+}
 
-  let releaseLock;
-  const thisLock = new Promise((resolve) => { releaseLock = resolve; });
-  const previousLock = viewPathLocks.get(viewPath);
-  viewPathLocks.set(viewPath, thisLock);
+/**
+ * Pre-fetch the first and last 64KB of a file from nzbdav2 (sequentially).
+ * Called during stream setup, BEFORE Stremio starts making probe requests.
+ */
+async function prefetchProbeData(viewPath, fileSize) {
+  if (probeDataCache.has(viewPath)) return;
+  if (!Number.isFinite(fileSize) || fileSize < PROBE_CHUNK_SIZE * 2) return;
 
-  // Wait for previous request's setup to finish (with timeout)
-  const lockTimer = setTimeout(() => {
-    console.warn(`[NZBDAV] ViewPath setup lock timeout for ${viewPath.slice(0, 60)}`);
-  }, VIEWPATH_LOCK_TIMEOUT_MS);
+  const normalizedPath = normalizeNzbdavPath(viewPath);
+  const encodedPath = normalizedPath.split('/').map((s) => encodeURIComponent(s)).join('/');
+  const webdavBase = NZBDAV_WEBDAV_URL.replace(/\/+$/, '');
+  const targetUrl = `${webdavBase}${encodedPath}`;
+  const auth = NZBDAV_WEBDAV_USER && NZBDAV_WEBDAV_PASS
+    ? { username: NZBDAV_WEBDAV_USER, password: NZBDAV_WEBDAV_PASS }
+    : undefined;
 
-  await Promise.race([
-    previousLock,
-    new Promise((resolve) => setTimeout(resolve, VIEWPATH_LOCK_TIMEOUT_MS))
-  ]);
-  clearTimeout(lockTimer);
+  const fetchChunk = async (rangeStart, rangeEnd) => {
+    const resp = await axios.request({
+      url: targetUrl,
+      method: 'GET',
+      headers: { Range: `bytes=${rangeStart}-${rangeEnd}` },
+      responseType: 'arraybuffer',
+      timeout: 60000,
+      validateStatus: (s) => s < 500,
+      auth,
+      httpAgent: nzbdavHttpAgent,
+      httpsAgent: nzbdavHttpsAgent
+    });
+    return Buffer.from(resp.data);
+  };
 
   try {
-    return await fn();
-  } finally {
-    releaseLock();
+    // Fetch head (first 64KB) — sequential, no concurrency
+    const headData = await fetchChunk(0, PROBE_CHUNK_SIZE - 1);
+
+    // Fetch tail (last 64KB) — sequential, after head completes
+    const tailStart = fileSize - PROBE_CHUNK_SIZE;
+    const tailData = await fetchChunk(tailStart, fileSize - 1);
+
+    probeDataCache.set(viewPath, {
+      headData,
+      tailData,
+      tailStart,
+      fileSize,
+      expiresAt: Date.now() + PROBE_CACHE_TTL_MS
+    });
+    console.log(`[NZBDAV] Pre-fetched probe data for ${normalizedPath} (head: ${headData.length}B, tail: ${tailData.length}B in sequential requests)`);
+  } catch (error) {
+    console.warn(`[NZBDAV] Probe prefetch failed (will fall through to live proxy): ${error.message}`);
   }
+}
+
+/**
+ * Try to serve a small range request from the probe cache.
+ * Returns true if served, false if the request should go to the live proxy.
+ */
+function tryServeFromProbeCache(req, res, viewPath) {
+  const rangeHeader = req.headers.range;
+  if (!rangeHeader) return false;
+
+  const cached = probeDataCache.get(viewPath);
+  if (!cached || cached.expiresAt < Date.now()) return false;
+
+  const match = rangeHeader.match(/^bytes=(\d+)-(\d*)$/);
+  if (!match) return false;
+
+  const reqStart = Number(match[1]);
+  const reqEnd = match[2] ? Number(match[2]) : null;
+
+  // Head probe: bytes=0-65535
+  if (reqStart === 0 && reqEnd !== null && reqEnd < cached.headData.length) {
+    const data = cached.headData.slice(0, reqEnd + 1);
+    res.status(206);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Range', `bytes 0-${reqEnd}/${cached.fileSize}`);
+    res.setHeader('Content-Length', String(data.length));
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Length,Content-Range,Content-Type,Accept-Ranges');
+    res.end(data);
+    console.log(`[NZBDAV] Served head probe from cache (${data.length}B)`);
+    return true;
+  }
+
+  // Tail probe: bytes=TAILSTART-END  (exact match or within the cached tail range)
+  if (reqStart >= cached.tailStart) {
+    const endByte = reqEnd !== null ? reqEnd : cached.fileSize - 1;
+    if (endByte <= cached.fileSize - 1) {
+      const offsetInTail = reqStart - cached.tailStart;
+      const length = endByte - reqStart + 1;
+      if (offsetInTail >= 0 && offsetInTail + length <= cached.tailData.length) {
+        const data = cached.tailData.slice(offsetInTail, offsetInTail + length);
+        res.status(206);
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Content-Range', `bytes ${reqStart}-${endByte}/${cached.fileSize}`);
+        res.setHeader('Content-Length', String(data.length));
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Length,Content-Range,Content-Type,Accept-Ranges');
+        res.end(data);
+        console.log(`[NZBDAV] Served tail probe from cache (${data.length}B, offset ${reqStart})`);
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 function resetWebdavClient() {
@@ -1093,6 +1181,12 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
   const isHead = originalMethod === 'HEAD';
   const proxiedMethod = originalMethod;
 
+  // Try serving small probe requests (head/tail 64KB) from cache
+  // to avoid concurrent RAR extraction in nzbdav2
+  if (!isHead && tryServeFromProbeCache(req, res, viewPath)) {
+    return;
+  }
+
   const normalizedPath = normalizeNzbdavPath(viewPath);
   const encodedPath = normalizedPath
     .split('/')
@@ -1225,10 +1319,7 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
   const rangeInfo = headers.Range ? ` [Range: ${headers.Range}]` : ' [no Range]';
   console.log(`[NZBDAV] Proxying ${proxiedMethod} ${targetUrl}${rangeInfo}`);
 
-  // Serialize request setup per viewPath to prevent concurrent RAR extraction
-  let nzbdavResponse = await withViewPathSetupLock(normalizedPath, () =>
-    axios.request(requestConfig)
-  );
+  let nzbdavResponse = await axios.request(requestConfig);
 
   let responseStatus = nzbdavResponse.status;
   let responseHeadersLower = Object.keys(nzbdavResponse.headers || {}).reduce((map, key) => {
@@ -1255,9 +1346,7 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
         // Brief pause to let nzbdav2 release RAR extraction state
         await new Promise((r) => setTimeout(r, 500));
 
-        nzbdavResponse = await withViewPathSetupLock(normalizedPath, () =>
-          axios.request(requestConfig)
-        );
+        nzbdavResponse = await axios.request(requestConfig);
         responseStatus = nzbdavResponse.status;
         responseHeadersLower = Object.keys(nzbdavResponse.headers || {}).reduce((map, key) => {
           map[key.toLowerCase()] = nzbdavResponse.headers[key];
@@ -1459,6 +1548,7 @@ module.exports = {
   streamFailureVideo,
   streamVideoTypeFailure,
   proxyNzbdavStream,
+  prefetchProbeData,
   getWebdavClient,
   reloadConfig,
   // Exported for testing
