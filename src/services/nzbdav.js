@@ -69,6 +69,42 @@ function setCachedFileSize(urlKey, size) {
   }
 }
 
+// Per-viewPath request setup serialization.
+// nzbdav2 corrupts data when concurrent Range requests hit the same RAR-extracted
+// file (the RAR extraction read pointer gets confused). This lock serializes the
+// request *setup* phase — from sending the request to receiving response headers.
+// Once headers arrive, the lock is released and data can flow concurrently.
+const viewPathLocks = new Map();
+const VIEWPATH_LOCK_TIMEOUT_MS = 15000;
+
+async function withViewPathSetupLock(viewPath, fn) {
+  if (!viewPathLocks.has(viewPath)) {
+    viewPathLocks.set(viewPath, Promise.resolve());
+  }
+
+  let releaseLock;
+  const thisLock = new Promise((resolve) => { releaseLock = resolve; });
+  const previousLock = viewPathLocks.get(viewPath);
+  viewPathLocks.set(viewPath, thisLock);
+
+  // Wait for previous request's setup to finish (with timeout)
+  const lockTimer = setTimeout(() => {
+    console.warn(`[NZBDAV] ViewPath setup lock timeout for ${viewPath.slice(0, 60)}`);
+  }, VIEWPATH_LOCK_TIMEOUT_MS);
+
+  await Promise.race([
+    previousLock,
+    new Promise((resolve) => setTimeout(resolve, VIEWPATH_LOCK_TIMEOUT_MS))
+  ]);
+  clearTimeout(lockTimer);
+
+  try {
+    return await fn();
+  } finally {
+    releaseLock();
+  }
+}
+
 function resetWebdavClient() {
   webdavClientPromise = null;
 }
@@ -1189,7 +1225,10 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
   const rangeInfo = headers.Range ? ` [Range: ${headers.Range}]` : ' [no Range]';
   console.log(`[NZBDAV] Proxying ${proxiedMethod} ${targetUrl}${rangeInfo}`);
 
-  let nzbdavResponse = await axios.request(requestConfig);
+  // Serialize request setup per viewPath to prevent concurrent RAR extraction
+  let nzbdavResponse = await withViewPathSetupLock(normalizedPath, () =>
+    axios.request(requestConfig)
+  );
 
   let responseStatus = nzbdavResponse.status;
   let responseHeadersLower = Object.keys(nzbdavResponse.headers || {}).reduce((map, key) => {
@@ -1216,7 +1255,9 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
         // Brief pause to let nzbdav2 release RAR extraction state
         await new Promise((r) => setTimeout(r, 500));
 
-        nzbdavResponse = await axios.request(requestConfig);
+        nzbdavResponse = await withViewPathSetupLock(normalizedPath, () =>
+          axios.request(requestConfig)
+        );
         responseStatus = nzbdavResponse.status;
         responseHeadersLower = Object.keys(nzbdavResponse.headers || {}).reduce((map, key) => {
           map[key.toLowerCase()] = nzbdavResponse.headers[key];
