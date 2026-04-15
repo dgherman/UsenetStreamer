@@ -1286,14 +1286,15 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
     await pipelineAsync(nzbdavResponse.data, byteCounter, res);
   } catch (error) {
     const isClientCloseCode = error?.code === 'ERR_STREAM_PREMATURE_CLOSE' || error?.code === 'ERR_STREAM_UNABLE_TO_PIPE';
-    if (isClientCloseCode && req.destroyed) {
-      console.warn('[NZBDAV] Stream closed early by client');
+    // If the client (Stremio) destroyed the connection, treat it as client-caused
+    // regardless of error code. ECONNRESET can be triggered by Stremio closing
+    // the TCP socket (e.g., sending a new Range request), and misclassifying
+    // that as upstream truncation poisons the negative cache.
+    if (req.destroyed) {
+      console.warn(`[NZBDAV] Stream closed early by client (${error?.code || 'unknown'}, ${bytesReceived} bytes sent)`);
       return;
     }
-    // For upstream ECONNRESET, Stremio may have already destroyed req in reaction to
-    // the connection drop. Only treat req.destroyed as client-caused when paired with
-    // a client-close error code (ERR_STREAM_PREMATURE_CLOSE / ERR_STREAM_UNABLE_TO_PIPE).
-    if (isUpstreamTruncated(bytesReceived, expectedBytes, isClientCloseCode && req.destroyed)) {
+    if (isUpstreamTruncated(bytesReceived, expectedBytes, false)) {
       const truncErr = new Error(
         `Upstream stream truncated: received ${bytesReceived} of ${expectedBytes} bytes`
       );
