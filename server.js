@@ -3156,12 +3156,16 @@ async function streamHandler(req, res) {
       const verifiedCandidates = [];
       triageEligibleResults.forEach((candidate) => {
         const decision = triageDecisions.get(candidate.downloadUrl);
-        if (decision && decision.status === 'verified' && typeof decision.nzbPayload === 'string') {
+        const hasInlinePayload = decision && decision.status === 'verified' && typeof decision.nzbPayload === 'string';
+        const hasCachedPayload = !hasInlinePayload && decision && decision.status === 'verified' && cache.getVerifiedNzbCacheEntry(candidate.downloadUrl);
+        if (hasInlinePayload) {
           cache.cacheVerifiedNzbPayload(candidate.downloadUrl, decision.nzbPayload, {
             title: decision.title || candidate.title,
             size: candidate.size,
             fileName: candidate.title,
           });
+        }
+        if (hasInlinePayload || hasCachedPayload) {
           // Skip blocklisted candidates for prefetch
           const isBlocklisted = BLOCKLIST_CHECKER.test(candidate.title);
           if (STREAMING_MODE !== 'native' && !isBlocklisted) {
@@ -3202,10 +3206,11 @@ async function streamHandler(req, res) {
       // NOTE: This must run BEFORE deleting nzbPayload from decisions
       if (TRIAGE_PREFETCH_FIRST_VERIFIED && STREAMING_MODE !== 'native' && prefetchCandidates.length === 0) {
         // Collect all verified, non-blocklisted candidates with their payloads
+        // Check both inline nzbPayload and separate NZB cache (payloads are stripped from cached decisions)
         const earlyVerifiedCandidates = [];
         for (const candidate of triageEligibleResults) {
           const decision = triageDecisions.get(candidate.downloadUrl);
-          if (decision && decision.status === 'verified' && typeof decision.nzbPayload === 'string') {
+          if (decision && decision.status === 'verified' && (typeof decision.nzbPayload === 'string' || cache.getVerifiedNzbCacheEntry(candidate.downloadUrl))) {
             // Skip blocklisted candidates for prefetch
             if (BLOCKLIST_CHECKER.test(candidate.title)) {
               continue;
@@ -3233,13 +3238,15 @@ async function streamHandler(req, res) {
               category: categoryForType,
               requestedEpisode,
             });
-            // Cache the NZB payload for prefetch
-            cache.cacheVerifiedNzbPayload(candidate.downloadUrl, decision.nzbPayload, {
-              title: decision.title || candidate.title,
-              size: candidate.size,
-              fileName: candidate.title,
-            });
-            delete decision.nzbPayload;
+            // Cache the NZB payload for prefetch (skip if already in separate NZB cache)
+            if (typeof decision.nzbPayload === 'string') {
+              cache.cacheVerifiedNzbPayload(candidate.downloadUrl, decision.nzbPayload, {
+                title: decision.title || candidate.title,
+                size: candidate.size,
+                fileName: candidate.title,
+              });
+              delete decision.nzbPayload;
+            }
             console.log(`[PREFETCH] Selected candidate (early): ${candidate.title}`);
           }
         } else if (TRIAGE_PREFETCH_COUNT > 0) {
@@ -3248,7 +3255,7 @@ async function streamHandler(req, res) {
           const unverifiedCandidates = [];
           for (const candidate of triageEligibleResults) {
             const decision = triageDecisions.get(candidate.downloadUrl);
-            if (decision && decision.status === 'unverified' && typeof decision.nzbPayload === 'string') {
+            if (decision && decision.status === 'unverified' && (typeof decision.nzbPayload === 'string' || cache.getVerifiedNzbCacheEntry(candidate.downloadUrl))) {
               // Skip blocklisted candidates
               if (BLOCKLIST_CHECKER.test(candidate.title)) {
                 continue;
@@ -3274,13 +3281,15 @@ async function streamHandler(req, res) {
               category: categoryForType,
               requestedEpisode,
             });
-            // Cache unverified NZB payload too - it might work
-            cache.cacheVerifiedNzbPayload(candidate.downloadUrl, decision.nzbPayload, {
-              title: decision.title || candidate.title,
-              size: candidate.size,
-              fileName: candidate.title,
-            });
-            delete decision.nzbPayload;
+            // Cache unverified NZB payload too - it might work (skip if already in separate NZB cache)
+            if (typeof decision.nzbPayload === 'string') {
+              cache.cacheVerifiedNzbPayload(candidate.downloadUrl, decision.nzbPayload, {
+                title: decision.title || candidate.title,
+                size: candidate.size,
+                fileName: candidate.title,
+              });
+              delete decision.nzbPayload;
+            }
             console.log(`[PREFETCH] No verified candidates - selected unverified fallback: ${candidate.title}`);
           }
         }
@@ -3294,11 +3303,22 @@ async function streamHandler(req, res) {
       });
     }
 
-      // Log when prefetch is enabled but no candidates found (likely all blocklisted)
+      // Log when prefetch is enabled but no candidates found
       if (TRIAGE_PREFETCH_FIRST_VERIFIED && STREAMING_MODE !== 'native' && prefetchCandidates.length === 0 && triageDecisions && triageDecisions.size > 0) {
-        const verifiedCount = Array.from(triageDecisions.values()).filter(d => d.status === 'verified').length;
-        if (verifiedCount > 0) {
-          console.log(`[NZBDAV] Prefetch skipped - ${verifiedCount} verified candidate(s) all blocklisted (remux/iso/etc)`);
+        const verifiedDecisions = Array.from(triageDecisions.entries()).filter(([, d]) => d.status === 'verified');
+        if (verifiedDecisions.length > 0) {
+          const blocklistedCount = verifiedDecisions.filter(([url]) => {
+            const candidate = triageEligibleResults.find(c => c.downloadUrl === url);
+            return candidate && BLOCKLIST_CHECKER.test(candidate.title);
+          }).length;
+          const noPayloadCount = verifiedDecisions.filter(([url, d]) =>
+            typeof d.nzbPayload !== 'string' && !cache.getVerifiedNzbCacheEntry(url)
+          ).length;
+          const reasons = [];
+          if (blocklistedCount > 0) reasons.push(`${blocklistedCount} blocklisted`);
+          if (noPayloadCount > 0) reasons.push(`${noPayloadCount} missing NZB payload`);
+          if (reasons.length === 0) reasons.push('unknown reason');
+          console.log(`[NZBDAV] Prefetch skipped - ${verifiedDecisions.length} verified candidate(s) not eligible (${reasons.join(', ')})`);
         }
       }
 
