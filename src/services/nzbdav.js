@@ -1097,7 +1097,14 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
 
   const sanitizedFileName = derivedFileName.replace(/[\\/:*?"<>|]+/g, '_') || 'stream';
 
-  if (req.headers.range) headers.Range = req.headers.range;
+  // Forward Range header, but strip "bytes=0-" (entire file) — sending it causes
+  // nzbdav2 to return 200 with Content-Range, which we then fix to 206.  Players
+  // (Stremio/VLC) treat the 206 as partial content and enter a probe-then-restart
+  // cycle that causes a visible ~40s skip.  Dropping the header makes nzbdav2
+  // return a clean 200 with Content-Length, which players handle as a normal download.
+  const isFullFileRange = /^bytes=0-$/i.test(req.headers.range || '');
+  if (req.headers.range && !isFullFileRange) headers.Range = req.headers.range;
+  if (isFullFileRange) console.log('[NZBDAV] Stripped full-file Range: bytes=0- (forwarding as plain GET)');
   if (req.headers['if-range']) headers['If-Range'] = req.headers['if-range'];
   if (req.headers.accept) headers.Accept = req.headers.accept;
   if (req.headers['accept-language']) headers['Accept-Language'] = req.headers['accept-language'];
@@ -1191,26 +1198,6 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
   let incomingContentRange = responseHeadersLower['content-range'];
   const upstreamCL = responseHeadersLower['content-length'];
   console.log(`[NZBDAV] Upstream responded ${responseStatus}${incomingContentRange ? ` Content-Range: ${incomingContentRange}` : ''}${upstreamCL ? ` Content-Length: ${upstreamCL}` : ''}`);
-
-  // When the client requests "bytes=0-" (the entire file) and the upstream
-  // confirms it IS the entire file via Content-Range, respond with 200 instead
-  // of 206.  This prevents Stremio from treating the response as partial
-  // content and restarting the stream after ~40 seconds of buffering.
-  // RFC 7233 explicitly allows returning 200 for any Range request.
-  const isFullFileRangeRequest = /^bytes=0-$/i.test(req.headers.range || '');
-  if (isFullFileRangeRequest && incomingContentRange) {
-    const crMatch = incomingContentRange.match(/bytes\s+0-(\d+)\s*\/\s*(\d+)/i);
-    if (crMatch && Number(crMatch[1]) + 1 === Number(crMatch[2])) {
-      console.log(`[NZBDAV] Downgrading 206→200 for full-file Range: bytes=0- (prevents Stremio restart)`);
-      responseStatus = 200;
-      incomingContentRange = null;
-      delete responseHeadersLower['content-range'];
-      // Also remove from the original headers so the allowlist loop doesn't forward it
-      Object.keys(nzbdavResponse.headers || {}).forEach((k) => {
-        if (k.toLowerCase() === 'content-range') delete nzbdavResponse.headers[k];
-      });
-    }
-  }
 
   if (incomingContentRange && responseStatus === 200) {
     responseStatus = 206;
