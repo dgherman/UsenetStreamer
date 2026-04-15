@@ -1909,6 +1909,7 @@ async function streamHandler(req, res) {
             if (instantStreams.length > 0) {
               stats.trackInstantHistoryHit(instantStreams.length);
               console.log(`[INSTANT CACHE] Returning ${instantStreams.length} instant stream(s) from history`);
+              instantStreams.forEach((s, i) => console.log(`[INSTANT CACHE] Stream[${i}] name=${JSON.stringify(s.name)} title=${JSON.stringify(s.title)}`));
               res.json({ streams: instantStreams });
               return;
             }
