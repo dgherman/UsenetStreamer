@@ -1075,6 +1075,163 @@ let TRIAGE_BASE_OPTIONS = {
 };
 let sharedPoolMonitorTimer = null;
 
+/**
+ * Converts a user-configured token list (e.g. "title, resolution, size") or
+ * raw template pattern into a formatStreamTitle-compatible template string.
+ * Pure function — no closure dependencies on loop variables.
+ */
+function buildPatternFromTokenList(rawPattern, variant, defaultPattern) {
+  if (rawPattern && typeof rawPattern === 'string' && rawPattern.includes('{')) {
+    return rawPattern;
+  }
+  const hasLineBreaks = /[\r\n]/.test(String(rawPattern || ''));
+  const normalizedList = String(rawPattern || '')
+    .replace(/\band\b/gi, ',')
+    .replace(/[;|]/g, ',');
+  const tokens = normalizedList
+    .split(',')
+    .map((token) => token.trim())
+    .filter(Boolean);
+  if (!hasLineBreaks && tokens.length === 0) return defaultPattern;
+
+  const shortTokenMap = {
+    addon: '{addon.name}',
+    title: '{stream.title::exists["{stream.title}"||""]}',
+    instant: '{stream.instant::istrue["⚡"||""]}',
+    health: '{stream.health::exists["{stream.health}"||""]}',
+    quality: '{stream.resolution::exists["{stream.resolution}"||""]}',
+    resolution_quality: '{stream.resolution::exists["{stream.resolution}"||""]}',
+    stream_quality: '{stream.streamQuality::exists["{stream.streamQuality}"||""]}',
+    resolution: '{stream.resolution::exists["{stream.resolution}"||""]}',
+    source: '{stream.source::exists["{stream.source}"||""]}',
+    codec: '{stream.encode::exists["{stream.encode}"||""]}',
+    group: '{stream.releaseGroup::exists["{stream.releaseGroup}"||""]}',
+    size: '{stream.size::>0["{stream.size::bytes}"||""]}',
+    languages: '{stream.languages::join(" ")::exists["{stream.languages::join(\\" \\")}"||""]}',
+    indexer: '{stream.indexer::exists["{stream.indexer}"||""]}',
+    filename: '{stream.filename::exists["{stream.filename}"||""]}',
+    tags: '{tags::exists["{tags}"||""]}',
+    files: '{stream.files::exists["{stream.files} files"||""]}',
+    grabs: '{stream.grabs::exists["{stream.grabs} grabs"||""]}',
+    date: '{stream.date::exists["{stream.date}"||""]}',
+  };
+
+  const longTokenMap = {
+    title: '{stream.title::exists["🎬 {stream.title}"||""]}',
+    filename: '{stream.filename::exists["📄 {stream.filename}"||""]}',
+    source: '{stream.source::exists["🎥 {stream.source}"||""]}',
+    codec: '{stream.encode::exists["🎞️ {stream.encode}"||""]}',
+    resolution: '{stream.resolution::exists["🖥️ {stream.resolution}"||""]}',
+    visual: '{stream.visualTags::join(" | ")::exists["📺 {stream.visualTags::join(\\" | \\")}"||""]}',
+    audio: '{stream.audioTags::join(" ")::exists["🎧 {stream.audioTags::join(\\" \\")}"||""]}',
+    group: '{stream.releaseGroup::exists["👥 {stream.releaseGroup}"||""]}',
+    size: '{stream.size::>0["📦 {stream.size::bytes}"||""]}',
+    languages: '{stream.languages::join(" ")::exists["🌎 {stream.languages::join(\\" \\")}"||""]}',
+    indexer: '{stream.indexer::exists["🔎 {stream.indexer}"||""]}',
+    health: '{stream.health::exists["🧪 {stream.health}"||""]}',
+    instant: '{stream.instant::istrue["⚡ Instant"||""]}',
+    files: '{stream.files::exists["📁 {stream.files} files"||""]}',
+    grabs: '{stream.grabs::exists["⬇️ {stream.grabs} grabs"||""]}',
+    date: '{stream.date::exists["📅 {stream.date}"||""]}',
+    quality: '{stream.resolution::exists["🖥️ {stream.resolution}"||""]}',
+    resolution_quality: '{stream.resolution::exists["🖥️ {stream.resolution}"||""]}',
+    stream_quality: '{stream.streamQuality::exists["✨ {stream.streamQuality}"||""]}',
+    tags: '{tags::exists["🏷️ {tags}"||""]}',
+  };
+
+  const tokenMap = variant === 'long' ? longTokenMap : shortTokenMap;
+
+  if (hasLineBreaks) {
+    const lines = String(rawPattern || '').split(/\r?\n/);
+    const lineParts = lines.map((line) => {
+      const normalizedLine = String(line || '')
+        .replace(/\band\b/gi, ',')
+        .replace(/[;|]/g, ',');
+      const lineTokens = normalizedLine
+        .split(',')
+        .map((token) => token.trim())
+        .filter(Boolean);
+      return lineTokens
+        .map((token) => tokenMap[token.toLowerCase()] || null)
+        .filter(Boolean)
+        .join(' ');
+    });
+    const separator = variant === 'long' ? '\n' : ' ';
+    const joined = lineParts.join(separator);
+    if (joined.replace(/\s/g, '') === '') return defaultPattern;
+    return joined;
+  }
+
+  const parts = tokens
+    .map((token) => tokenMap[token.toLowerCase()] || null)
+    .filter(Boolean);
+
+  if (parts.length === 0) return defaultPattern;
+  return parts.join(' ');
+}
+
+/**
+ * Format an instant stream's name/title fields using the same naming template
+ * system as regular streams. Parses the release name to extract resolution,
+ * codec, source, group, etc.
+ */
+function formatInstantStreamFields(jobName, size) {
+  const parsed = parseReleaseMetadata(jobName);
+  const detectedResolution = parsed.resolution || '';
+  const addonLabel = ADDON_NAME || DEFAULT_ADDON_NAME;
+  const sizeInGB = size ? (size / 1073741824).toFixed(2) : null;
+  const sizeString = sizeInGB ? `${sizeInGB} GB` : '';
+  const tags = ['⚡ Instant'];
+  if (sizeString) tags.push(sizeString);
+  const tagsString = tags.filter(Boolean).join(' • ');
+
+  const namingContext = {
+    addon: { name: addonLabel },
+    stream: {
+      title: parsed.parsedTitleDisplay || parsed.parsedTitle || jobName,
+      filename: jobName,
+      resolution: detectedResolution,
+      source: parsed.source || '',
+      encode: parsed.codec || '',
+      visualTags: parsed.visualTags || parsed.hdrList || [],
+      audioTags: parsed.audioList || [],
+      releaseGroup: parsed.group || '',
+      size: size || 0,
+      indexer: '',
+      languages: parsed.languages || [],
+      health: '',
+      instant: true,
+      cached: true,
+      files: null,
+      grabs: null,
+      date: null,
+      streamQuality: detectedResolution,
+      parsedTitleDisplay: parsed.parsedTitleDisplay || parsed.parsedTitle || jobName,
+    },
+    service: { shortName: 'Usenet', cached: true, instant: true },
+    tags: tagsString,
+    title: parsed.parsedTitleDisplay || parsed.parsedTitle || jobName,
+    indexer: '',
+    resolution: detectedResolution,
+    quality: detectedResolution,
+    health: '',
+    size: size || 0,
+    source: parsed.source || '',
+    codec: parsed.codec || '',
+    group: parsed.group || '',
+  };
+
+  const defaultDescriptionPattern = '{stream.parsedTitleDisplay::exists["{stream.parsedTitleDisplay}\\n"||""]}{stream.resolution::exists["🖥️ {stream.resolution}"||""]}{stream.source::exists[" {stream.source}"||""]}{stream.encode::exists[" {stream.encode}"||""]}{stream.visualTags::join(" ")::exists[" | {stream.visualTags::join(\\" \\")}"||""]}\\n{stream.size::>0["📦 {stream.size::bytes}"||""]}{stream.indexer::exists[" | 🔎 {stream.indexer}"||""]}\\n{stream.health::exists["🧪 {stream.health}"||""]}';
+  const descPattern = buildPatternFromTokenList(NZB_NAMING_PATTERN, 'long', defaultDescriptionPattern);
+  const formattedTitle = formatStreamTitle(descPattern, namingContext, defaultDescriptionPattern);
+
+  const defaultNamePattern = '{addon.name} {stream.health::exists["{stream.health} "||""]}{stream.instant::istrue["⚡ "||""]}{stream.resolution::exists["{stream.resolution}"||""]}';
+  const namePattern = buildPatternFromTokenList(NZB_DISPLAY_NAME_PATTERN, 'short', defaultNamePattern);
+  const formattedName = formatStreamTitle(namePattern, namingContext, defaultNamePattern);
+
+  return { formattedName, formattedTitle };
+}
+
 function buildSharedPoolOptions() {
   if (!TRIAGE_NNTP_CONFIG) return null;
   return {
@@ -1737,9 +1894,10 @@ async function streamHandler(req, res) {
                 historyCategory: historyEntry.category || categoryForInstant,
               }).toString();
 
+              const { formattedName: instantName, formattedTitle: instantTitle } = formatInstantStreamFields(historyEntry.jobName, historyEntry.size || instantEntry.size || 0);
               instantStreams.push({
-                name: `${ADDON_NAME || 'UsenetStreamer'}\n⚡ Instant`,
-                title: historyEntry.jobName,
+                name: instantName,
+                title: instantTitle,
                 url: streamUrl,
                 behaviorHints: {
                   bingeGroup: `usenetstreamer-instant-${baseIdentifier}`,
@@ -1768,9 +1926,10 @@ async function streamHandler(req, res) {
                 historyCategory: historyMatch.category || categoryForInstant,
               }).toString();
 
+              const { formattedName: fallbackName, formattedTitle: fallbackTitle } = formatInstantStreamFields(instantEntry.jobName, instantEntry.size || 0);
               const instantStream = {
-                name: `${ADDON_NAME || 'UsenetStreamer'}\n⚡ Instant`,
-                title: instantEntry.jobName,
+                name: fallbackName,
+                title: fallbackTitle,
                 url: streamUrl,
                 behaviorHints: {
                   bingeGroup: `usenetstreamer-instant-${baseIdentifier}`,
@@ -3733,96 +3892,6 @@ async function streamHandler(req, res) {
           group: result.group || '',
         };
 
-        const buildPatternFromTokenList = (rawPattern, variant, defaultPattern) => {
-          if (rawPattern && typeof rawPattern === 'string' && rawPattern.includes('{')) {
-            return rawPattern;
-          }
-          const hasLineBreaks = /[\r\n]/.test(String(rawPattern || ''));
-          const normalizedList = String(rawPattern || '')
-            .replace(/\band\b/gi, ',')
-            .replace(/[;|]/g, ',');
-          const tokens = normalizedList
-            .split(',')
-            .map((token) => token.trim())
-            .filter(Boolean);
-          if (!hasLineBreaks && tokens.length === 0) return defaultPattern;
-
-          const shortTokenMap = {
-            addon: '{addon.name}',
-            title: '{stream.title::exists["{stream.title}"||""]}',
-            instant: '{stream.instant::istrue["⚡"||""]}',
-            health: '{stream.health::exists["{stream.health}"||""]}',
-            quality: '{stream.resolution::exists["{stream.resolution}"||""]}',
-            resolution_quality: '{stream.resolution::exists["{stream.resolution}"||""]}',
-            stream_quality: '{stream.streamQuality::exists["{stream.streamQuality}"||""]}',
-            resolution: '{stream.resolution::exists["{stream.resolution}"||""]}',
-            source: '{stream.source::exists["{stream.source}"||""]}',
-            codec: '{stream.encode::exists["{stream.encode}"||""]}',
-            group: '{stream.releaseGroup::exists["{stream.releaseGroup}"||""]}',
-            size: '{stream.size::>0["{stream.size::bytes}"||""]}',
-            languages: '{stream.languages::join(" ")::exists["{stream.languages::join(\\" \\")}"||""]}',
-            indexer: '{stream.indexer::exists["{stream.indexer}"||""]}',
-            filename: '{stream.filename::exists["{stream.filename}"||""]}',
-            tags: '{tags::exists["{tags}"||""]}',
-            files: '{stream.files::exists["{stream.files} files"||""]}',
-            grabs: '{stream.grabs::exists["{stream.grabs} grabs"||""]}',
-            date: '{stream.date::exists["{stream.date}"||""]}',
-          };
-
-          const longTokenMap = {
-            title: '{stream.title::exists["🎬 {stream.title}"||""]}',
-            filename: '{stream.filename::exists["📄 {stream.filename}"||""]}',
-            source: '{stream.source::exists["🎥 {stream.source}"||""]}',
-            codec: '{stream.encode::exists["🎞️ {stream.encode}"||""]}',
-            resolution: '{stream.resolution::exists["🖥️ {stream.resolution}"||""]}',
-            visual: '{stream.visualTags::join(" | ")::exists["📺 {stream.visualTags::join(\\" | \\")}"||""]}',
-            audio: '{stream.audioTags::join(" ")::exists["🎧 {stream.audioTags::join(\\" \\")}"||""]}',
-            group: '{stream.releaseGroup::exists["👥 {stream.releaseGroup}"||""]}',
-            size: '{stream.size::>0["📦 {stream.size::bytes}"||""]}',
-            languages: '{stream.languages::join(" ")::exists["🌎 {stream.languages::join(\\" \\")}"||""]}',
-            indexer: '{stream.indexer::exists["🔎 {stream.indexer}"||""]}',
-            health: '{stream.health::exists["🧪 {stream.health}"||""]}',
-            instant: '{stream.instant::istrue["⚡ Instant"||""]}',
-            files: '{stream.files::exists["📁 {stream.files} files"||""]}',
-            grabs: '{stream.grabs::exists["⬇️ {stream.grabs} grabs"||""]}',
-            date: '{stream.date::exists["📅 {stream.date}"||""]}',
-            quality: '{stream.resolution::exists["🖥️ {stream.resolution}"||""]}',
-            resolution_quality: '{stream.resolution::exists["🖥️ {stream.resolution}"||""]}',
-            stream_quality: '{stream.streamQuality::exists["✨ {stream.streamQuality}"||""]}',
-            tags: '{tags::exists["🏷️ {tags}"||""]}',
-          };
-
-          const tokenMap = variant === 'long' ? longTokenMap : shortTokenMap;
-
-          if (hasLineBreaks) {
-            const lines = String(rawPattern || '').split(/\r?\n/);
-            const lineParts = lines.map((line) => {
-              const normalizedLine = String(line || '')
-                .replace(/\band\b/gi, ',')
-                .replace(/[;|]/g, ',');
-              const lineTokens = normalizedLine
-                .split(',')
-                .map((token) => token.trim())
-                .filter(Boolean);
-              return lineTokens
-                .map((token) => tokenMap[token.toLowerCase()] || null)
-                .filter(Boolean)
-                .join(' ');
-            });
-            const separator = variant === 'long' ? '\n' : ' ';
-            const joined = lineParts.join(separator);
-            if (joined.replace(/\s/g, '') === '') return defaultPattern;
-            return joined;
-          }
-
-          const parts = tokens
-            .map((token) => tokenMap[token.toLowerCase()] || null)
-            .filter(Boolean);
-
-          if (parts.length === 0) return defaultPattern;
-          return parts.join(' ');
-        };
-
         const effectiveDefaultDescriptionPattern = '{stream.parsedTitleDisplay::exists["{stream.parsedTitleDisplay}\\n"||""]}{stream.resolution::exists["🖥️ {stream.resolution}"||""]}{stream.source::exists[" {stream.source}"||""]}{stream.encode::exists[" {stream.encode}"||""]}{stream.visualTags::join(" ")::exists[" | {stream.visualTags::join(\\" \\")}"||""]}\\n{stream.size::>0["📦 {stream.size::bytes}"||""]}{stream.indexer::exists[" | 🔎 {stream.indexer}"||""]}\\n{stream.health::exists["🧪 {stream.health}"||""]}';
         const effectiveDescriptionPattern = buildPatternFromTokenList(NZB_NAMING_PATTERN, 'long', effectiveDefaultDescriptionPattern);
         const formattedTitle = formatStreamTitle(effectiveDescriptionPattern, namingContext, effectiveDefaultDescriptionPattern);
@@ -4026,9 +4095,10 @@ async function streamHandler(req, res) {
         });
         const historyStreamUrl = `${addonBaseUrl}${tokenSegment}/nzb/stream?${historyParams.toString()}`;
 
+        const { formattedName: historyName, formattedTitle: historyTitle } = formatInstantStreamFields(historyEntry.jobName, historyEntry.size || 0);
         const historyStream = {
-          title: `${historyEntry.jobName}\n⚡ Instant • History\n${historyEntry.category || 'nzbdav'}`,
-          name: ADDON_NAME || DEFAULT_ADDON_NAME,
+          title: historyTitle,
+          name: historyName,
           url: historyStreamUrl,
           behaviorHints: {
             notWebReady: true,
