@@ -1066,7 +1066,8 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
   const targetUrl = `${webdavBase}${encodedPath}`;
   const headers = {};
 
-  console.log(`[NZBDAV] Streaming ${normalizedPath} via WebDAV`);
+  const incomingRange = req.headers.range || 'none';
+  console.log(`[NZBDAV] Streaming ${normalizedPath} via WebDAV (range: ${incomingRange})`);
 
   const coerceToString = (value) => {
     if (Array.isArray(value)) {
@@ -1176,7 +1177,8 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
     };
   }
 
-  console.log(`[NZBDAV] Proxying ${proxiedMethod} ${targetUrl}`);
+  const rangeInfo = headers.Range ? ` [Range: ${headers.Range}]` : ' [no Range]';
+  console.log(`[NZBDAV] Proxying ${proxiedMethod} ${targetUrl}${rangeInfo}`);
 
   const nzbdavResponse = await axios.request(requestConfig);
 
@@ -1187,6 +1189,8 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
   }, {});
 
   const incomingContentRange = responseHeadersLower['content-range'];
+  const upstreamCL = responseHeadersLower['content-length'];
+  console.log(`[NZBDAV] Upstream responded ${responseStatus}${incomingContentRange ? ` Content-Range: ${incomingContentRange}` : ''}${upstreamCL ? ` Content-Length: ${upstreamCL}` : ''}`);
   if (incomingContentRange && responseStatus === 200) {
     responseStatus = 206;
   }
