@@ -69,6 +69,25 @@ function setCachedFileSize(urlKey, size) {
   }
 }
 
+// Serialize data requests per viewPath to prevent concurrent RAR extraction
+// in nzbdav2. Lock is held for the ENTIRE pipeline (request + streaming),
+// not just the request setup. Probe requests are served from cache and
+// bypass this lock. With tail probes cached, serialization no longer causes
+// the 25-second delays that made the previous attempt fail.
+const streamLocks = new Map();
+async function acquireStreamLock(viewPath) {
+  while (streamLocks.has(viewPath)) {
+    await streamLocks.get(viewPath);
+  }
+  let release;
+  const lockPromise = new Promise((r) => { release = r; });
+  streamLocks.set(viewPath, lockPromise);
+  return () => {
+    streamLocks.delete(viewPath);
+    release();
+  };
+}
+
 // Probe data cache: pre-fetch and cache the first/last 64KB of each file
 // so that Stremio's MKV probe requests are served from memory instead of
 // hitting nzbdav2 concurrently with the main stream. This eliminates the
@@ -1339,7 +1358,12 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
   const rangeInfo = headers.Range ? ` [Range: ${headers.Range}]` : ' [no Range]';
   console.log(`[NZBDAV] Proxying ${proxiedMethod} ${targetUrl}${rangeInfo}`);
 
-  let nzbdavResponse = await axios.request(requestConfig);
+  // Acquire stream lock — held until the ENTIRE pipeline (request + data
+  // streaming) completes, preventing concurrent RAR extraction in nzbdav2.
+  const releaseStreamLock = await acquireStreamLock(normalizedPath);
+  let nzbdavResponse;
+  try { // eslint-disable-line -- intentionally large try block to hold stream lock
+    nzbdavResponse = await axios.request(requestConfig);
 
   let responseStatus = nzbdavResponse.status;
   let responseHeadersLower = Object.keys(nzbdavResponse.headers || {}).reduce((map, key) => {
@@ -1512,6 +1536,9 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
       throw truncErr;
     }
     throw error;
+  }
+  } finally {
+    releaseStreamLock();
   }
 }
 
