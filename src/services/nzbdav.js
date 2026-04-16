@@ -69,22 +69,44 @@ function setCachedFileSize(urlKey, size) {
   }
 }
 
-// Serialize data requests per viewPath to prevent concurrent RAR extraction
-// in nzbdav2. Lock is held for the ENTIRE pipeline (request + streaming),
-// not just the request setup. Probe requests are served from cache and
-// bypass this lock. With tail probes cached, serialization no longer causes
-// the 25-second delays that made the previous attempt fail.
-const streamLocks = new Map();
-async function acquireStreamLock(viewPath) {
-  while (streamLocks.has(viewPath)) {
-    await streamLocks.get(viewPath);
+// Active stream tracking: when Stremio sends overlapping Range requests for
+// the same file (e.g., continuation bytes=128MB- and playback bytes=128.3MB-),
+// the combined data floods its 250MB buffer causing it to kill the connection
+// and skip to the next episode.  Fix: abort the older stream when a new one
+// arrives with an overlapping range.  Non-overlapping concurrent requests
+// (different byte regions) are allowed through — nzbdav2 handles those fine.
+const activeStreams = new Map(); // viewPath → [{rangeStart, rangeEnd, abortController}]
+
+function registerStream(viewPath, rangeStart, rangeEnd) {
+  const entries = activeStreams.get(viewPath) || [];
+  const abortController = new AbortController();
+
+  // Abort any existing streams whose range overlaps the new request
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (rangeStart <= e.rangeEnd && rangeEnd >= e.rangeStart) {
+      console.log(
+        `[NZBDAV] Aborting overlapping stream ${e.rangeStart}-${e.rangeEnd} — superseded by ${rangeStart}-${rangeEnd}`
+      );
+      e.abortController.abort();
+      entries.splice(i, 1);
+    }
   }
-  let release;
-  const lockPromise = new Promise((r) => { release = r; });
-  streamLocks.set(viewPath, lockPromise);
-  return () => {
-    streamLocks.delete(viewPath);
-    release();
+
+  const entry = { rangeStart, rangeEnd, abortController };
+  entries.push(entry);
+  activeStreams.set(viewPath, entries);
+
+  return {
+    signal: abortController.signal,
+    unregister() {
+      const arr = activeStreams.get(viewPath);
+      if (arr) {
+        const idx = arr.indexOf(entry);
+        if (idx !== -1) arr.splice(idx, 1);
+        if (arr.length === 0) activeStreams.delete(viewPath);
+      }
+    }
   };
 }
 
@@ -1358,11 +1380,29 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
   const rangeInfo = headers.Range ? ` [Range: ${headers.Range}]` : ' [no Range]';
   console.log(`[NZBDAV] Proxying ${proxiedMethod} ${targetUrl}${rangeInfo}`);
 
-  // Acquire stream lock — held until the ENTIRE pipeline (request + data
-  // streaming) completes, preventing concurrent RAR extraction in nzbdav2.
-  const releaseStreamLock = await acquireStreamLock(normalizedPath);
+  // Parse effective byte range for active-stream overlap detection
+  let effectiveRangeStart = 0;
+  let effectiveRangeEnd = totalFileSize ? totalFileSize - 1 : Number.MAX_SAFE_INTEGER;
+  if (headers.Range) {
+    const rangeMatch = headers.Range.match(/^bytes=(\d+)-(\d*)$/);
+    if (rangeMatch) {
+      effectiveRangeStart = Number(rangeMatch[1]);
+      if (rangeMatch[2]) effectiveRangeEnd = Number(rangeMatch[2]);
+    }
+  }
+
+  // Register data streams (not HEAD) and abort any overlapping active stream
+  // for the same file.  This prevents Stremio's concurrent continuation+playback
+  // requests from flooding its buffer and triggering skip-to-next.
+  const streamRegistration = isHead
+    ? null
+    : registerStream(normalizedPath, effectiveRangeStart, effectiveRangeEnd);
+  const streamAbortSignal = streamRegistration?.signal;
+  const unregisterStream = streamRegistration?.unregister;
+
   let nzbdavResponse;
-  try { // eslint-disable-line -- intentionally large try block to hold stream lock
+  try {
+    if (streamAbortSignal) requestConfig.signal = streamAbortSignal;
     nzbdavResponse = await axios.request(requestConfig);
 
   let responseStatus = nzbdavResponse.status;
@@ -1518,7 +1558,12 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
   try {
     await pipelineAsync(nzbdavResponse.data, byteCounter, res);
   } catch (error) {
-    const isClientCloseCode = error?.code === 'ERR_STREAM_PREMATURE_CLOSE' || error?.code === 'ERR_STREAM_UNABLE_TO_PIPE';
+    // Stream aborted because a newer overlapping request superseded this one
+    if (streamAbortSignal?.aborted) {
+      console.log(`[NZBDAV] Stream aborted (superseded by overlapping request, ${bytesReceived} bytes sent)`);
+      if (!res.headersSent) res.status(499).end();
+      return;
+    }
     // If the client (Stremio) destroyed the connection, treat it as client-caused
     // regardless of error code. ECONNRESET can be triggered by Stremio closing
     // the TCP socket (e.g., sending a new Range request), and misclassifying
@@ -1537,8 +1582,16 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
     }
     throw error;
   }
+  } catch (outerError) {
+    // Abort from overlapping-stream detection — not a real error
+    if (streamAbortSignal?.aborted || outerError?.code === 'ERR_CANCELED') {
+      console.log(`[NZBDAV] Request aborted (superseded by overlapping request)`);
+      if (!res.headersSent) res.status(499).end();
+      return;
+    }
+    throw outerError;
   } finally {
-    releaseStreamLock();
+    if (unregisterStream) unregisterStream();
   }
 }
 
