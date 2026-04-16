@@ -130,6 +130,8 @@ async function prefetchProbeData(viewPath, fileSize) {
       fileSize,
       expiresAt: Date.now() + PROBE_CACHE_TTL_MS
     });
+    // Also populate the file size cache so proxyNzbdavStream can cap Range requests
+    setCachedFileSize(targetUrl, fileSize);
     console.log(`[NZBDAV] Pre-fetched probe data for ${normalizedPath} (head: ${headData.length}B, tail: ${tailData.length}B in sequential requests)`);
   } catch (error) {
     console.warn(`[NZBDAV] Probe prefetch failed (will fall through to live proxy): ${error.message}`);
@@ -1227,7 +1229,26 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
 
   const sanitizedFileName = derivedFileName.replace(/[\\/:*?"<>|]+/g, '_') || 'stream';
 
-  if (req.headers.range) headers.Range = req.headers.range;
+  let totalFileSize = getCachedFileSize(targetUrl);
+
+  // Cap open-ended Range requests to ~128MB chunks.
+  // Stremio's player buffers ~250MB then kills the connection and never
+  // reconnects for the rest. By limiting each response to 128MB, the player
+  // receives a complete 206 response and naturally sends a follow-up Range
+  // request for the next chunk. 128MB ≈ 2-3 minutes of 1080p video.
+  const RANGE_CHUNK_SIZE = 128 * 1024 * 1024; // 128MB
+  if (req.headers.range) {
+    const openEndedMatch = req.headers.range.match(/^bytes=(\d+)-$/);
+    if (openEndedMatch && totalFileSize) {
+      const rangeStart = Number(openEndedMatch[1]);
+      const maxEnd = totalFileSize - 1;
+      const cappedEnd = Math.min(rangeStart + RANGE_CHUNK_SIZE - 1, maxEnd);
+      headers.Range = `bytes=${rangeStart}-${cappedEnd}`;
+      console.log(`[NZBDAV] Capped open-ended range: ${req.headers.range} → ${headers.Range} (file size: ${totalFileSize})`);
+    } else {
+      headers.Range = req.headers.range;
+    }
+  }
   if (req.headers['if-range']) headers['If-Range'] = req.headers['if-range'];
   if (req.headers.accept) headers.Accept = req.headers.accept;
   if (req.headers['accept-language']) headers['Accept-Language'] = req.headers['accept-language'];
@@ -1235,7 +1256,6 @@ async function proxyNzbdavStream(req, res, viewPath, fileNameHint = '') {
   if (req.headers['user-agent']) headers['User-Agent'] = req.headers['user-agent'];
   if (!headers['Accept-Encoding']) headers['Accept-Encoding'] = 'identity';
 
-  let totalFileSize = getCachedFileSize(targetUrl);
   if (NZBDAV_STREAM_PREFETCH_HEAD && !req.headers.range && !isHead && !totalFileSize) {
     const headConfig = {
       url: targetUrl,
