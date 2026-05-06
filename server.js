@@ -924,13 +924,7 @@ function dedupeResultsByTitle(results) {
       continue;
     }
     const usenetGroup = extractUsenetGroup(result);
-    if (!usenetGroup) {
-      // Require a group token for safe duplicate collapsing across indexers.
-      deduped.push(result);
-      continue;
-    }
-
-    const bucketKey = `${normalizedTitle}|${usenetGroup}`;
+    const bucketKey = usenetGroup ? `${normalizedTitle}|${usenetGroup}` : normalizedTitle;
     let bucket = buckets.get(bucketKey);
     if (!bucket) {
       bucket = [];
