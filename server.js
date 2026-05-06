@@ -42,7 +42,7 @@ const cache = require('./src/cache');
 const { ensureAdminSecret, ensureStreamToken, getEffectiveStreamToken } = require('./src/middleware/auth');
 const newznabService = require('./src/services/newznab');
 const easynewsService = require('./src/services/easynews');
-const { toFiniteNumber, toPositiveInt, toNonNegativeInt, toBoolean, parseCommaList, parsePathList, normalizeSortMode, resolvePreferredLanguages, toSizeBytesFromGb, collectConfigValues, computeManifestUrl, stripTrailingSlashes, decodeBase64Value } = require('./src/utils/config');
+const { toFiniteNumber, toPositiveInt, toNonNegativeInt, toBoolean, parseCommaList, parsePathList, normalizeSortMode, resolvePreferredLanguages, toSizeBytesFromGb, toSizeBytesFromMb, collectConfigValues, computeManifestUrl, stripTrailingSlashes, decodeBase64Value } = require('./src/utils/config');
 const { normalizeReleaseTitle, parseRequestedEpisode, isVideoFileName, fileMatchesEpisode, normalizeNzbdavPath, inferMimeType, normalizeIndexerToken, nzbMatchesIndexer, cleanSpecialSearchTitle, findMatchingHistoryItems } = require('./src/utils/parsers');
 const { sleep, annotateNzbResult, applyMaxSizeFilter, prepareSortedResults, getPreferredLanguageMatch, getPreferredLanguageMatches, triageStatusRank, buildTriageTitleMap, prioritizeTriageCandidates, triageDecisionsMatchStatuses, sanitizeDecisionForCache, serializeFinalNzbResults, restoreFinalNzbResults, safeStat, selectBestRepairCandidate, formatStreamTitle } = require('./src/utils/helpers');
 const indexerService = require('./src/services/indexer');
@@ -1043,6 +1043,7 @@ let INDEXER_MAX_RESULT_SIZE_BYTES = toSizeBytesFromGb(
     ? process.env.NZB_MAX_RESULT_SIZE_GB
     : DEFAULT_MAX_RESULT_SIZE_GB
 );
+let INDEXER_MIN_RESULT_SIZE_BYTES = toSizeBytesFromMb(process.env.NZB_MIN_RESULT_SIZE_MB || '45');
 let ALLOWED_RESOLUTIONS = parseAllowedResolutionList(process.env.NZB_ALLOWED_RESOLUTIONS);
 let RESOLUTION_LIMIT_PER_QUALITY = parseResolutionLimitValue(process.env.NZB_RESOLUTION_LIMIT_PER_QUALITY);
 let TRIAGE_ENABLED = toBoolean(process.env.NZB_TRIAGE_ENABLED, false);
@@ -1368,6 +1369,7 @@ function rebuildRuntimeConfig({ log = true } = {}) {
       ? process.env.NZB_MAX_RESULT_SIZE_GB
       : DEFAULT_MAX_RESULT_SIZE_GB
   );
+  INDEXER_MIN_RESULT_SIZE_BYTES = toSizeBytesFromMb(process.env.NZB_MIN_RESULT_SIZE_MB || '45');
   ALLOWED_RESOLUTIONS = parseAllowedResolutionList(process.env.NZB_ALLOWED_RESOLUTIONS);
   RESOLUTION_LIMIT_PER_QUALITY = parseResolutionLimitValue(process.env.NZB_RESOLUTION_LIMIT_PER_QUALITY);
 
@@ -3102,6 +3104,9 @@ async function streamHandler(req, res) {
       allowedResolutions: ALLOWED_RESOLUTIONS,
       resolutionLimitPerQuality: RESOLUTION_LIMIT_PER_QUALITY,
     });
+    if (Number.isFinite(INDEXER_MIN_RESULT_SIZE_BYTES) && INDEXER_MIN_RESULT_SIZE_BYTES > 0) {
+      finalNzbResults = finalNzbResults.filter(r => !Number.isFinite(r.size) || r.size >= INDEXER_MIN_RESULT_SIZE_BYTES);
+    }
     if (dedupeEnabled) {
       finalNzbResults = dedupeResultsByTitle(finalNzbResults);
     }

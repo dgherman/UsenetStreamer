@@ -167,6 +167,12 @@ function toSizeBytesFromGb(value) {
   return numeric * 1024 * 1024 * 1024;
 }
 
+function toSizeBytesFromMb(value) {
+  const numeric = toFiniteNumber(value, null);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  return numeric * 1024 * 1024;
+}
+
 function collectConfigValues(keys) {
   const values = {};
   keys.forEach((key) => {
@@ -198,6 +204,7 @@ module.exports = {
   resolvePreferredLanguages,
   resolvePreferredLanguage,
   toSizeBytesFromGb,
+  toSizeBytesFromMb,
   collectConfigValues,
   computeManifestUrl,
 };
