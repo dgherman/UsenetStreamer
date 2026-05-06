@@ -2,11 +2,11 @@
 const crypto = require('crypto');
 
 // ---------------------------------------------------------------------------
-// Rate-limiter: sliding-window counter per IP
+// Rate-limiter: true sliding-window per IP (admin routes only)
 // ---------------------------------------------------------------------------
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
-const RATE_LIMIT_MAX = 60;              // max requests per window
-const rateLimitBuckets = new Map();
+const RATE_LIMIT_MAX = 180;             // max requests per window
+const rateLimitBuckets = new Map();     // ip → number[] (timestamps)
 
 // ---------------------------------------------------------------------------
 // Failed-login lockout: block IP after repeated auth failures
@@ -17,8 +17,9 @@ const failedAttempts = new Map();       // ip → { count, lockedUntil, lastAtte
 
 function pruneRateLimitBuckets() {
   const now = Date.now();
-  for (const [ip, bucket] of rateLimitBuckets) {
-    if (now - bucket.windowStart > RATE_LIMIT_WINDOW_MS * 2) {
+  const cutoff = now - RATE_LIMIT_WINDOW_MS;
+  for (const [ip, timestamps] of rateLimitBuckets) {
+    if (timestamps.length === 0 || timestamps[timestamps.length - 1] < cutoff) {
       rateLimitBuckets.delete(ip);
     }
   }
@@ -33,13 +34,19 @@ setInterval(pruneRateLimitBuckets, 5 * 60 * 1000).unref();
 function rateLimitCheck(req) {
   const ip = req.ip || req.connection?.remoteAddress || 'unknown';
   const now = Date.now();
-  let bucket = rateLimitBuckets.get(ip);
-  if (!bucket || now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
-    bucket = { windowStart: now, count: 0 };
-    rateLimitBuckets.set(ip, bucket);
+  const cutoff = now - RATE_LIMIT_WINDOW_MS;
+  let timestamps = rateLimitBuckets.get(ip);
+  if (!timestamps) {
+    timestamps = [];
+    rateLimitBuckets.set(ip, timestamps);
   }
-  bucket.count += 1;
-  return bucket.count <= RATE_LIMIT_MAX;
+  // Evict timestamps outside the sliding window
+  let start = 0;
+  while (start < timestamps.length && timestamps[start] < cutoff) start++;
+  if (start > 0) timestamps.splice(0, start);
+  if (timestamps.length >= RATE_LIMIT_MAX) return false;
+  timestamps.push(now);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
