@@ -2102,7 +2102,7 @@ async function streamHandler(req, res) {
     // Check if we should use TMDb as primary metadata source
     const tmdbConfig = tmdbService.getConfig();
     const shouldUseTmdb = tmdbService.isConfigured() && incomingImdbId;
-    const skipMetadataFetch = Boolean(cachedSearchMeta?.triageComplete);
+    const skipMetadataFetch = Boolean(cachedSearchMeta);
     
     let tmdbMetadata = null;
     let tmdbMetadataPromise = null;
