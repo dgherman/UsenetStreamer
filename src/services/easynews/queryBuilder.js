@@ -1,0 +1,104 @@
+function appendEpisodeSuffix(title, { type, releaseYear, seasonNum, episodeNum }) {
+  if (!title) return '';
+  if (type === 'movie' && Number.isFinite(releaseYear)) return `${title} ${releaseYear}`;
+  if (type === 'series' && Number.isFinite(seasonNum) && Number.isFinite(episodeNum)) {
+    return `${title} S${String(seasonNum).padStart(2, '0')}E${String(episodeNum).padStart(2, '0')}`;
+  }
+  return title;
+}
+
+function isValidAsciiQuery(str) {
+  if (!str || /[^\x00-\x7F]/.test(str)) return false;
+  if (/^s\d{2}e\d{2}$/i.test(str) || /^\d{4}$/.test(str)) return false;
+  return str.replace(/[^a-zA-Z]/g, '').length >= 2;
+}
+
+/**
+ * Builds the list of EasyNews search queries to run for a stream request.
+ * Returns a params object (queries array + shared params) or null if no valid queries.
+ *
+ * Query priority:
+ *   1. All TMDb title variants — English first, then regional/additional
+ *   2. All anime title variants (for anime requests)
+ *   3. Text fallback (ASCII-normalized primary title + year/episode)
+ */
+function buildEasynewsSearchParams({
+  type,
+  releaseYear,
+  seasonNum,
+  episodeNum,
+  tmdbTitles,
+  isAnimeRequest,
+  animeSearchableTitles,
+  textQueryFallbackValue,
+  movieTitle,
+  baseIdentifier,
+  isSpecialRequest,
+  specialMetadataTitle,
+  requestLacksIdentifiers,
+  strictMode,
+  normalizeToAscii,
+}) {
+  const seenKeys = new Set();
+  const queries = [];
+  const suffixCtx = { type, releaseYear, seasonNum, episodeNum };
+
+  const tryAdd = (rawTitle, alreadyHasSuffix = false, originalTitle = null) => {
+    if (!rawTitle) return;
+    const normalized = normalizeToAscii(rawTitle.trim());
+    if (!normalized) return;
+    const original = (originalTitle || rawTitle).replace(/\s+/g, '');
+    if (original.length > 0 && normalized.length / original.length < 0.8) return;
+    const withSuffix = alreadyHasSuffix
+      ? normalized.trim()
+      : appendEpisodeSuffix(normalized, suffixCtx).trim();
+    if (!isValidAsciiQuery(withSuffix)) return;
+    const key = withSuffix.toLowerCase();
+    if (seenKeys.has(key)) return;
+    seenKeys.add(key);
+    queries.push(withSuffix);
+  };
+
+  if (isSpecialRequest) {
+    tryAdd(specialMetadataTitle, true);
+    tryAdd(movieTitle);
+    tryAdd(textQueryFallbackValue, true);
+  } else {
+    if (tmdbTitles?.length > 0) {
+      const sorted = [...tmdbTitles].sort((a, b) =>
+        (a.language?.startsWith('en') ? 0 : 1) - (b.language?.startsWith('en') ? 0 : 1)
+      );
+      for (const t of sorted) {
+        tryAdd(t.asciiTitle || t.title, false, t.title);
+      }
+    }
+
+    if (isAnimeRequest && animeSearchableTitles?.length > 0) {
+      for (const t of animeSearchableTitles) {
+        tryAdd(t.asciiTitle, false, t.title || t.asciiTitle);
+      }
+    }
+
+    tryAdd(textQueryFallbackValue, true);
+
+    if (queries.length === 0) tryAdd(movieTitle);
+  }
+
+  if (queries.length === 0 && baseIdentifier) {
+    queries.push(baseIdentifier);
+  }
+
+  if (queries.length === 0) return null;
+
+  return {
+    queries,
+    fallbackQuery: textQueryFallbackValue || baseIdentifier || movieTitle || '',
+    year: Number.isFinite(releaseYear) ? releaseYear : null,
+    season: type === 'series' ? seasonNum : null,
+    episode: type === 'series' ? episodeNum : null,
+    strictMode: Boolean(strictMode),
+    specialTextOnly: Boolean(isSpecialRequest || requestLacksIdentifiers),
+  };
+}
+
+module.exports = { buildEasynewsSearchParams };
