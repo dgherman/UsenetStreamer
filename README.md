@@ -214,7 +214,20 @@ Anything that can load HTTPS manifests and handle `externalPlayer` hints should 
 
 ## 📝 Changelog
 
-### [next] - 2026-04-12
+### [next] - 2026-05-06
+- Upstream sync: X-Addon-Token header now takes priority over Authorization header for stream token extraction (upstream 4b1d5d9)
+- Upstream sync: fix TMDB/TVDB season/episode off-by-one — ID parsing now uses last two segments, handles `tmdb:<id>:S:E` correctly (upstream 7b4aff5)
+- Upstream sync: SceneNZBs TVDB strict episode filter — results from SceneNZBs validated against requested season/episode when TVDB token is used; `String()` coercion for Prowlarr numeric indexer IDs (upstream 5528fff+6baacdc)
+- Upstream sync: skip TMDb metadata fetch when search cache is hit (upstream 6e7cc5f)
+- Upstream sync: `skipHydra` plan flag — when IMDB is present, skip redundant Hydra searches for TMDB-token plans (upstream 5f2bc1f)
+- Upstream sync: `NZB_MIN_RESULT_SIZE_MB` config (default 45 MB) to filter out noise/incomplete results (upstream 9aff46e)
+- Upstream sync: dedup by title alone when usenet group is absent — previously such results were not deduped at all (upstream a0edf48)
+- Upstream sync: rate limiter upgraded to true sliding window, limit increased to 180 req/min (upstream ac665f1)
+- Upstream sync: Easynews multi-title parallel search — queryBuilder runs all TMDb title variants in parallel and dedupes by GUID (upstream e6e1c30)
+- Upstream sync: admin help.html documentation page with cache section; save confirmation notes cache is cleared (upstream a2747a0+080ba2e)
+- Upstream sync: Prowlarr/Hydra contextual placeholder hints in indexer manager UI (upstream ab1eea2)
+
+### [prev] - 2026-04-12
 - Upstream sync: NNTP pool hang-up fix — reduce default connections to 12, add 15s acquire timeout and 30s prewarm timeout, require fresh pool on stale builder (upstream 392770c)
 - Upstream sync: security hardening — header allowlist on NZBDav proxy, error URL sanitization, credential masking for admin API, failed-login lockout (10 attempts / 15min), CSRF Origin checking, runtime-env.json file permissions (upstream 3e75d88+e473adc)
 - Upstream sync: extended attributes — request extended=1 from Newznab, parse files/grabs/group/usenetdate, fix Easynews post date field, date/files sort criteria, dedup uses title+group bucket key and prefers fewer-files releases (upstream 004ed78+b8fb0dd+b3ea762)
