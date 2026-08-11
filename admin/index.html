@@ -71,7 +71,7 @@
           <input id="profileNameInput" type="text" placeholder="Profile name" maxlength="64" />
           <button type="button" id="deleteProfileBtn" class="secondary">Delete</button>
         </div>
-        <p class="hint" id="profileHint">Profiles share all credentials, indexers, NZBDav and NNTP settings. They only override sorting/filtering, naming, stream protection, streaming mode, catalog, and addon name. Each profile installs as its own Stremio addon at <code>/&lt;token&gt;/&lt;profile&gt;/manifest.json</code>.</p>
+        <p class="hint" id="profileHint">Profiles share all credentials, indexers, NZBDav and NNTP settings. They only override sorting/filtering, naming, stream protection, streaming mode, indexer selection, catalog, and addon name. Each profile installs as its own Stremio addon at <code>/&lt;token&gt;/&lt;profile&gt;/manifest.json</code>.</p>
         <p class="hint hidden" id="profileMultiInstallWarning">⚠️ <strong>Install only one profile per Stremio account.</strong> Stremio queries every installed addon on each title, so adding two profiles to the same account runs this addon twice per request — duplicating searches and triage, and slowing results. Use different profiles on different Stremio accounts or devices.</p>
         <p class="hint hidden" id="profileInstallHint"></p>
       </div>
@@ -118,10 +118,6 @@
             </label>
             <label data-manager-field>API Key
               <input name="INDEXER_MANAGER_API_KEY" type="password" autocomplete="new-password" />
-            </label>
-            <label data-manager-field class="align-2line">Indexer IDs / Names
-              <input name="INDEXER_MANAGER_INDEXERS" type="text" placeholder="-1 or sci-fi,4k" />
-              <span class="field-hint">Comma-separated list of indexers this addon may query. Prowlarr: numeric IDs, with -1 meaning “all Usenet indexers”. NZBHydra: type the indexer names exactly as shown in Hydra.</span>
             </label>
             <label data-manager-field class="align-2line">I have paid subscriptions with (comma separated)
               <input name="NZB_TRIAGE_PRIORITY_INDEXERS" type="text" placeholder="9,33" />
@@ -191,6 +187,21 @@
               <button type="button" class="secondary" data-test="newznab-search">Run Test Search</button>
               <span class="status-message" data-test-status="newznab-search"></span>
             </div>
+          </div>
+        </section>
+
+        <section class="group" id="indexerSelectionGroup" data-profile-section="Indexer Selection">
+          <h3>Indexer Selection</h3>
+          <p class="hint">Restrict which of the indexers configured above this addon actually queries. Leave a field empty to query all of them. Override it per profile to keep, say, a Spanish-content profile off your English-only indexers.</p>
+          <div class="field-grid">
+            <label data-manager-field class="align-2line">Indexer IDs / Names
+              <input name="INDEXER_MANAGER_INDEXERS" type="text" placeholder="-1 or sci-fi,4k" />
+              <span class="field-hint">Comma-separated list of manager indexers this addon may query. Prowlarr: numeric IDs, with -1 meaning “all Usenet indexers”. NZBHydra: type the indexer names exactly as shown in Hydra.</span>
+            </label>
+            <label class="align-2line">Direct Newznab Indexers
+              <input name="NEWZNAB_INDEXERS" type="text" placeholder="nzbgeek,drunkenslug" />
+              <span class="field-hint">Comma-separated names of the Direct Newznab rows above to query. Empty = all enabled rows.</span>
+            </label>
           </div>
         </section>
 

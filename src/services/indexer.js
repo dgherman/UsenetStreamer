@@ -63,28 +63,43 @@ function ensureIndexerManagerConfigured() {
   }
 }
 
+// Resolve which manager indexers a single search may hit. `override` is a
+// per-profile selection (issue #86) and wins whenever it is non-blank; blank or
+// absent falls back to the global INDEXER_MANAGER_INDEXERS, so a config without
+// any selection behaves exactly as before.
+function resolveManagerIndexers(override) {
+  const raw = typeof override === 'string' ? override.trim() : '';
+  if (!raw) return INDEXER_MANAGER_INDEXERS;
+  const joined = raw
+    .split(',')
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0)
+    .join(',');
+  return joined || INDEXER_MANAGER_INDEXERS;
+}
+
 // Prowlarr functions
-function buildProwlarrIndexerIdList() {
-  if (!INDEXER_MANAGER_INDEXERS) return null;
-  if (INDEXER_MANAGER_INDEXERS === '-1') return ['-1'];
-  const tokens = INDEXER_MANAGER_INDEXERS.split(',')
+function buildProwlarrIndexerIdList(indexers = INDEXER_MANAGER_INDEXERS) {
+  if (!indexers) return null;
+  if (indexers === '-1') return ['-1'];
+  const tokens = indexers.split(',')
     .map((token) => token.trim())
     .filter((token) => token.length > 0);
   return tokens.length > 0 ? tokens : null;
 }
 
-function buildProwlarrSearchParams(plan) {
+function buildProwlarrSearchParams(plan, indexers = INDEXER_MANAGER_INDEXERS) {
   return {
     limit: String(PROWLARR_SEARCH_LIMIT),
     offset: '0',
     type: plan.type,
     query: plan.query,
-    indexerIdsList: buildProwlarrIndexerIdList()
+    indexerIdsList: buildProwlarrIndexerIdList(indexers)
   };
 }
 
-async function executeProwlarrSearch(plan) {
-  const params = buildProwlarrSearchParams(plan);
+async function executeProwlarrSearch(plan, options = {}) {
+  const params = buildProwlarrSearchParams(plan, resolveManagerIndexers(options.indexers));
   const urlSearchParams = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {
     if (value === undefined || value === null) return;
@@ -149,15 +164,15 @@ function applyTokenToHydraParams(token, params) {
   }
 }
 
-function buildHydraSearchParams(plan) {
+function buildHydraSearchParams(plan, indexers = INDEXER_MANAGER_INDEXERS) {
   const params = {
     apikey: INDEXER_MANAGER_API_KEY,
     t: mapHydraSearchType(plan.type),
     o: 'json'
   };
 
-  if (INDEXER_MANAGER_INDEXERS) {
-    params.indexers = INDEXER_MANAGER_INDEXERS;
+  if (indexers) {
+    params.indexers = indexers;
   }
 
   if (INDEXER_MANAGER_CACHE_MINUTES > 0) {
@@ -387,8 +402,8 @@ function normalizeHydraResults(data) {
   return results;
 }
 
-async function executeNzbhydraSearch(plan) {
-  const params = buildHydraSearchParams(plan);
+async function executeNzbhydraSearch(plan, options = {}) {
+  const params = buildHydraSearchParams(plan, resolveManagerIndexers(options.indexers));
   const url = `${INDEXER_MANAGER_BASE_URL}/api`;
   const response = await axios.get(url, {
     params,
@@ -407,15 +422,17 @@ async function executeNzbhydraSearch(plan) {
   return normalizeHydraResults(response.data);
 }
 
-// Main execution function
-function executeIndexerPlan(plan) {
+// Main execution function.
+// `options.indexers` narrows the search to a comma-separated subset of manager
+// indexers (per-profile selection); omit it to query the globally configured set.
+function executeIndexerPlan(plan, options = {}) {
   if (INDEXER_MANAGER === 'none') {
     return Promise.resolve([]);
   }
   if (isUsingNzbhydra()) {
-    return executeNzbhydraSearch(plan);
+    return executeNzbhydraSearch(plan, options);
   }
-  return executeProwlarrSearch(plan);
+  return executeProwlarrSearch(plan, options);
 }
 
 // Result annotation

@@ -1,9 +1,10 @@
 // Profile manager — multi-profile support (Phase 0 scaffolding; no callers yet).
 //
-// Profiles are named override sets that share all global config (creds, indexers,
-// NZBDav, NNTP, TMDb/TVDB, proxy, caches) but each override a small fixed set of
-// categories: addon name, stream-protection mode, sorting, filtering, naming,
-// and Stremio catalog limit.
+// Profiles are named override sets that share all global config (creds, indexer
+// definitions, NZBDav, NNTP, TMDb/TVDB, proxy, caches) but each override a small
+// fixed set of categories: addon name, stream-protection mode, which of the
+// configured indexers to query, sorting, filtering, naming, and Stremio catalog
+// limit.
 //
 // Storage: flat numbered-slot keys in runtime-env.json (mirrors the per-indexer
 // NEWZNAB_<FIELD>_<NN> pattern, but number-first for readability so a profile's
@@ -30,6 +31,11 @@ const PROFILE_OVERRIDES = {
   ADDON_NAME: 'ADDON_NAME',
   STREAMING_MODE: 'STREAMING_MODE',
   STREAM_PROTECTION: 'NZB_STREAM_PROTECTION',
+  // Which indexers this profile is allowed to query. Blank => inherit the global
+  // list, which itself means "every configured indexer" — so an existing config
+  // with no per-profile selection keeps querying everything.
+  INDEXER_MANAGER_INDEXERS: 'INDEXER_MANAGER_INDEXERS',
+  NEWZNAB_INDEXERS: 'NEWZNAB_INDEXERS',
   SORT_ORDER: 'NZB_SORT_ORDER',
   SORT_ORDER_MOVIES: 'NZB_SORT_ORDER_MOVIES',
   SORT_ORDER_SERIES: 'NZB_SORT_ORDER_SERIES',

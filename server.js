@@ -734,6 +734,10 @@ let indexerManagerUnavailableUntil = 0;
 
 let NEWZNAB_ENABLED = toBoolean(process.env.NEWZNAB_ENABLED, false);
 let NEWZNAB_FILTER_NZB_ONLY = toBoolean(process.env.NEWZNAB_FILTER_NZB_ONLY, false);
+// Optional subset of the configured Direct Newznab rows to query. Blank (the
+// default) = query every enabled row, i.e. the original behaviour. Mirrors
+// INDEXER_MANAGER_INDEXERS for the direct side, and is overridable per profile.
+let NEWZNAB_INDEXERS = (process.env.NEWZNAB_INDEXERS || '').trim();
 let DEBUG_NEWZNAB_SEARCH = toBoolean(process.env.DEBUG_NEWZNAB_SEARCH, false);
 let DEBUG_NEWZNAB_TEST = toBoolean(process.env.DEBUG_NEWZNAB_TEST, false);
 let DEBUG_NEWZNAB_ENDPOINTS = toBoolean(process.env.DEBUG_NEWZNAB_ENDPOINTS, false);
@@ -1112,6 +1116,7 @@ function rebuildRuntimeConfig({ log = true } = {}) {
 
   NEWZNAB_ENABLED = toBoolean(process.env.NEWZNAB_ENABLED, false);
   NEWZNAB_FILTER_NZB_ONLY = toBoolean(process.env.NEWZNAB_FILTER_NZB_ONLY, false);
+  NEWZNAB_INDEXERS = (process.env.NEWZNAB_INDEXERS || '').trim();
   DEBUG_NEWZNAB_SEARCH = toBoolean(process.env.DEBUG_NEWZNAB_SEARCH, false);
   DEBUG_NEWZNAB_TEST = toBoolean(process.env.DEBUG_NEWZNAB_TEST, false);
   DEBUG_NEWZNAB_ENDPOINTS = toBoolean(process.env.DEBUG_NEWZNAB_ENDPOINTS, false);
@@ -1293,7 +1298,7 @@ const ADMIN_CONFIG_KEYS = [
   'TVDB_API_KEY',
 ];
 
-ADMIN_CONFIG_KEYS.push('NEWZNAB_ENABLED', 'NEWZNAB_FILTER_NZB_ONLY', ...NEWZNAB_NUMBERED_KEYS);
+ADMIN_CONFIG_KEYS.push('NEWZNAB_ENABLED', 'NEWZNAB_FILTER_NZB_ONLY', 'NEWZNAB_INDEXERS', ...NEWZNAB_NUMBERED_KEYS);
 
 // Filter-side env vars (excluded/required/regex). These were referenced by
 // admin/index.html and the server's filter pipeline, but were missing from
@@ -1318,7 +1323,9 @@ ADMIN_CONFIG_KEYS.push(
   'NZB_AIO_SORT_CONFIG',
 );
 
-function executeManagerPlanWithBackoff(plan, skipManager = false) {
+// `options.indexerManagerIndexers` narrows the manager fan-out to the indexers a
+// profile selected (issue #86). Undefined/blank => the global list applies.
+function executeManagerPlanWithBackoff(plan, skipManager = false, options = {}) {
   if (skipManager || INDEXER_MANAGER === 'none') {
     return Promise.resolve({ results: [] });
   }
@@ -1330,7 +1337,7 @@ function executeManagerPlanWithBackoff(plan, skipManager = false) {
     console.warn(`${INDEXER_LOG_PREFIX} Skipping manager search during backoff (${remaining}s remaining)`);
     return Promise.resolve({ results: [], errors: [`manager backoff (${remaining}s remaining)`] });
   }
-  return indexerService.executeIndexerPlan(plan)
+  return indexerService.executeIndexerPlan(plan, { indexers: options.indexerManagerIndexers })
     .then((data) => ({ results: Array.isArray(data) ? data : [] }))
     .catch((error) => {
       if (INDEXER_MANAGER_BACKOFF_ENABLED) {
@@ -1341,14 +1348,20 @@ function executeManagerPlanWithBackoff(plan, skipManager = false) {
     });
 }
 
-function executeNewznabPlan(plan) {
+// `options.newznabIndexers` narrows the direct-Newznab fan-out to the rows a
+// profile selected (issue #86). Undefined => the global NEWZNAB_INDEXERS applies,
+// which is blank by default and means "every enabled row".
+function executeNewznabPlan(plan, options = {}) {
   const debugEnabled = isNewznabDebugEnabled();
   const endpointLogEnabled = isNewznabEndpointLoggingEnabled();
   const planSummary = summarizeNewznabPlan(plan);
-  if (!NEWZNAB_ENABLED || ACTIVE_NEWZNAB_CONFIGS.length === 0) {
+  const selection = options.newznabIndexers !== undefined ? options.newznabIndexers : NEWZNAB_INDEXERS;
+  const selectedConfigs = newznabService.selectIndexerConfigs(ACTIVE_NEWZNAB_CONFIGS, selection);
+  if (!NEWZNAB_ENABLED || selectedConfigs.length === 0) {
     logNewznabDebug('Skipping search plan because direct Newznab is disabled or no configs are available', {
       enabled: NEWZNAB_ENABLED,
-      activeConfigs: ACTIVE_NEWZNAB_CONFIGS.length,
+      activeConfigs: selectedConfigs.length,
+      selection: selection || null,
       plan: planSummary,
     });
     return Promise.resolve({ results: [], errors: [], endpoints: [] });
@@ -1357,16 +1370,17 @@ function executeNewznabPlan(plan) {
   if (debugEnabled) {
     logNewznabDebug('Dispatching search plan', {
       plan: planSummary,
-      indexers: ACTIVE_NEWZNAB_CONFIGS.map((config) => ({
+      indexers: selectedConfigs.map((config) => ({
         id: config.id,
         name: config.displayName || config.endpoint,
         endpoint: config.endpoint,
       })),
+      selection: selection || null,
       filterNzbOnly: NEWZNAB_FILTER_NZB_ONLY,
     });
   }
 
-  return newznabService.searchNewznabIndexers(plan, ACTIVE_NEWZNAB_CONFIGS, {
+  return newznabService.searchNewznabIndexers(plan, selectedConfigs, {
     filterNzbOnly: NEWZNAB_FILTER_NZB_ONLY,
     debug: debugEnabled,
     logEndpoints: endpointLogEnabled,
@@ -1590,6 +1604,15 @@ async function streamHandler(req, res) {
   // via the /nzb/fetch proxy so the manager is fine. nzbdav profiles + the default are
   // unaffected (false — the instance INDEXER_MANAGER already reflects native-instance HTTP).
   const effSkipManager = effStreamingMode === 'native' && !/^https:/i.test(ADDON_BASE_URL) && INDEXER_MANAGER !== 'none';
+  // Per-profile indexer selection (issue #86): a profile may query only a subset of
+  // the configured indexers. sortSource already folds the profile's overrides over
+  // the globals, so an unset selection resolves to the global value and the fan-out
+  // is unchanged. The default profile (profileEff null) passes undefined and keeps
+  // using the module-level globals directly.
+  const effIndexerOptions = {
+    indexerManagerIndexers: profileEff ? sortSource.INDEXER_MANAGER_INDEXERS : undefined,
+    newznabIndexers: profileEff ? sortSource.NEWZNAB_INDEXERS : undefined,
+  };
   console.log(`[REQUEST] Received request for ${type} ID: ${id}`, { ts: new Date(requestStartTs).toISOString() });
   let triagePrewarmPromise = null;
 
@@ -2254,8 +2277,8 @@ async function streamHandler(req, res) {
           console.log(`${INDEXER_LOG_PREFIX} Dispatching early ID plan`, plan);
           const planStartTs = Date.now();
           return Promise.allSettled([
-            executeManagerPlanWithBackoff(plan, effSkipManager),
-            executeNewznabPlan(plan),
+            executeManagerPlanWithBackoff(plan, effSkipManager, effIndexerOptions),
+            executeNewznabPlan(plan, effIndexerOptions),
           ]).then((settled) => ({ plan, settled, startTs: planStartTs, endTs: Date.now() }));
         }));
       }
@@ -2323,8 +2346,8 @@ async function streamHandler(req, res) {
             console.log(`${INDEXER_LOG_PREFIX} Added Cinemeta TVDB ID plan`, { tvdb: metaIds.tvdb });
             const planStartTs = Date.now();
             idSearchPromises.push(Promise.allSettled([
-              executeManagerPlanWithBackoff(searchPlans[searchPlans.length - 1], effSkipManager),
-              executeNewznabPlan(searchPlans[searchPlans.length - 1]),
+              executeManagerPlanWithBackoff(searchPlans[searchPlans.length - 1], effSkipManager, effIndexerOptions),
+              executeNewznabPlan(searchPlans[searchPlans.length - 1], effIndexerOptions),
             ]).then((settled) => ({
               plan: searchPlans[searchPlans.length - 1],
               settled,
@@ -2868,8 +2891,8 @@ async function streamHandler(req, res) {
       const planExecutions = remainingPlans.map((plan) => {
         console.log(`${INDEXER_LOG_PREFIX} Dispatching plan`, plan);
         return Promise.allSettled([
-          executeManagerPlanWithBackoff(plan, effSkipManager),
-          executeNewznabPlan(plan),
+          executeManagerPlanWithBackoff(plan, effSkipManager, effIndexerOptions),
+          executeNewznabPlan(plan, effIndexerOptions),
         ]).then((settled) => {
           const managerSet = settled[0];
           const newznabSet = settled[1];

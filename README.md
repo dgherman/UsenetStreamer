@@ -164,7 +164,7 @@ The dashboard and stream routes are protected by secret tokens. Rotate secrets/t
 ## ⚙️ Configuration & Environment Variables *(prefer the admin dashboard)*
 
 - **Indexer sources:** `INDEXER_MANAGER` (`none`, `prowlarr`, `nzbhydra`), `INDEXER_MANAGER_URL`, `INDEXER_MANAGER_API_KEY`, `INDEXER_MANAGER_INDEXERS`, `INDEXER_MANAGER_STRICT_ID_MATCH`.
-- **Direct Newznab mode:** `NEWZNAB_ENABLED`, `NEWZNAB_FILTER_NZB_ONLY`, numbered `NEWZNAB_*` entries, optional `NEWZNAB_CAPS_CACHE`.
+- **Direct Newznab mode:** `NEWZNAB_ENABLED`, `NEWZNAB_FILTER_NZB_ONLY`, `NEWZNAB_INDEXERS` (subset of the configured rows to query; empty = all), numbered `NEWZNAB_*` entries, optional `NEWZNAB_CAPS_CACHE`.
 - **Addon security + routing:** `ADDON_BASE_URL` (HTTPS), `ADDON_SHARED_SECRET` (required), optional `ADDON_STREAM_TOKEN` (separate stream token).
 - **Sorting + filtering:** `NZB_SORT_MODE` (legacy/back-compat), `NZB_SORT_ORDER` (priority chain, default `quality,size,files`), `NZB_PREFERRED_LANGUAGE`, `NZB_DEDUP_ENABLED`, `NZB_MAX_RESULT_SIZE_GB`, `NZB_ALLOWED_RESOLUTIONS`, `NZB_RESOLUTION_LIMIT_PER_QUALITY`, `NZB_RELEASE_EXCLUSIONS`.
 - **Stream naming:** `NZB_DISPLAY_NAME_PATTERN`, `NZB_NAMING_PATTERN` with token-list support (`title`, `stream_quality`, `source`, `codec`, `group`, `size`, `files`, `date`, `languages`, `indexer`, `health`, etc.).

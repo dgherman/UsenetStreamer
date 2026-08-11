@@ -564,6 +564,29 @@ function filterUsableConfigs(configs = [], { requireEnabled = true, requireApiKe
 }
 
 /**
+ * Narrow a set of Direct Newznab configs down to an explicit selection.
+ * `selection` is a comma-separated list of indexer identifiers — the slot key
+ * ("01"), its ordinal ("1"), slug/dedupeKey, display name or configured name.
+ * A blank/absent selection means "no narrowing at all" and returns the configs
+ * unchanged, which is the behaviour of every config that never sets one.
+ */
+function selectIndexerConfigs(configs = [], selection) {
+  const wanted = new Set(
+    String(selection || '')
+      .split(',')
+      .map((token) => token.trim().toLowerCase())
+      .filter((token) => token.length > 0)
+  );
+  if (wanted.size === 0) return configs;
+  return configs.filter((config) => {
+    if (!config) return false;
+    return [config.id, config.ordinal, config.dedupeKey, config.slug, config.displayName, config.name]
+      .filter((value) => value !== undefined && value !== null && value !== '')
+      .some((value) => wanted.has(String(value).toLowerCase()));
+  });
+}
+
+/**
  * Resolve the configured download User-Agent for a given indexer identifier.
  * The identifier can be a slug/dedupeKey (preferred) or a display name. If no
  * matching indexer is found or it has no override, returns the global default.
@@ -1136,6 +1159,7 @@ module.exports = {
   getEnvNewznabConfigs,
   getNewznabConfigsFromValues,
   filterUsableConfigs,
+  selectIndexerConfigs,
   getDownloadUserAgentForIndexer,
   getProxyForIndexer,
   searchNewznabIndexers,
