@@ -195,13 +195,18 @@
           <p class="hint">Restrict which of the indexers configured above this addon actually queries. Leave a field empty to query all of them. Override it per profile to keep, say, a Spanish-content profile off your English-only indexers.</p>
           <div class="field-grid">
             <label data-manager-field class="align-2line">Indexer IDs / Names
-              <input name="INDEXER_MANAGER_INDEXERS" type="text" placeholder="-1 or sci-fi,4k" />
+              <input name="INDEXER_MANAGER_INDEXERS" type="text" placeholder="-1" />
               <span class="field-hint">Comma-separated list of manager indexers this addon may query. Prowlarr: numeric IDs, with -1 meaning “all Usenet indexers”. NZBHydra: type the indexer names exactly as shown in Hydra.</span>
             </label>
-            <label class="align-2line">Direct Newznab Indexers
-              <input name="NEWZNAB_INDEXERS" type="text" placeholder="01,03" />
-              <span class="field-hint">Comma-separated IDs of the Direct Newznab rows above to query — use the ID printed on each row (“Indexer 01”, “Indexer 02”, …). Empty = all enabled rows. These IDs follow row position, so reordering or removing a row shifts them.</span>
-            </label>
+            <div class="wide-field">
+              <span class="field-label">Direct Newznab Indexers</span>
+              <span class="field-hint">Pick the indexers to query. Select none to query every enabled indexer. The ID in brackets is what gets stored, so a renamed indexer keeps its selection.</span>
+              <input name="NEWZNAB_INDEXERS" type="hidden" />
+              <div class="option-category" data-newznab-indexer-picker>
+                <div class="option-chip-row" data-newznab-indexer-chips></div>
+                <span class="field-hint hidden" data-newznab-indexer-empty>No Direct Newznab indexers configured yet — add one in the section above.</span>
+              </div>
+            </div>
           </div>
         </section>
 

@@ -720,6 +720,108 @@
   function refreshNewznabFieldNames() {
     const rows = getNewznabRows();
     rows.forEach((row, idx) => assignRowFieldNames(row, idx + 1));
+    refreshIndexerPicker();
+  }
+
+  // ── Direct Newznab indexer picker (issue #86) ───────────────────────────────
+  // "Indexer Selection" stores canonical zero-padded slot IDs, but nobody wants
+  // to memorise slot numbers, so the control is a chip picker (same pattern as
+  // the preferred/excluded pickers) labelled with each indexer's display name and
+  // driving a hidden comma-separated ID list. Display the name, store the ID:
+  // names are user-supplied and can repeat or change, IDs are unique.
+  function newznabRowDisplayName(row) {
+    const id = row.dataset.index || '';
+    const name = (row.querySelector('[data-field="NAME"]') || {}).value || '';
+    if (name.trim()) return name.trim();
+    const endpoint = ((row.querySelector('[data-field="ENDPOINT"]') || {}).value || '').trim();
+    if (endpoint) {
+      try {
+        return new URL(endpoint).hostname || `Indexer ${id}`;
+      } catch (error) {
+        return endpoint;
+      }
+    }
+    return `Indexer ${id}`;
+  }
+
+  function newznabIndexerOptions() {
+    return getNewznabRows()
+      .map((row) => {
+        const enabledToggle = row.querySelector('[data-field="INDEXER_ENABLED"]');
+        return {
+          id: row.dataset.index || '',
+          name: newznabRowDisplayName(row),
+          enabled: !enabledToggle || enabledToggle.checked,
+        };
+      })
+      .filter((option) => option.id);
+  }
+
+  function buildIndexerChip(input, { value, label, id, stale, disabledRow }) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'option-chip' + (stale ? ' option-chip-stale active' : '');
+    chip.dataset.value = value;
+    chip.textContent = label;
+    if (id) {
+      const idTag = document.createElement('span');
+      idTag.className = 'option-chip-id';
+      idTag.textContent = `(${id})`;
+      chip.appendChild(idTag);
+    }
+    if (stale) {
+      chip.title = 'This indexer no longer exists — click to remove it from the selection.';
+    } else if (disabledRow) {
+      chip.title = 'This indexer is currently disabled in the Direct Newznab section.';
+    }
+    chip.addEventListener('click', (event) => {
+      event.preventDefault();
+      toggleValueInCommaInput(input, value);
+      refreshIndexerPicker();
+    });
+    return chip;
+  }
+
+  function refreshIndexerPicker() {
+    const chipRow = configForm && configForm.querySelector('[data-newznab-indexer-chips]');
+    const input = configForm && configForm.querySelector('input[name="NEWZNAB_INDEXERS"]');
+    if (!chipRow || !input) return;
+    const options = newznabIndexerOptions();
+    const selected = parseCommaInput(input.value);
+    const selectedLower = selected.map((token) => token.toLowerCase());
+    const known = new Set(options.map((option) => option.id.toLowerCase()));
+
+    chipRow.innerHTML = '';
+    options.forEach((option) => {
+      const chip = buildIndexerChip(input, {
+        value: option.id,
+        label: option.name,
+        id: option.id,
+        disabledRow: !option.enabled,
+      });
+      chip.classList.toggle('active', selectedLower.includes(option.id.toLowerCase()));
+      chipRow.appendChild(chip);
+    });
+    // Slot IDs follow row position, so removing or reordering a row can orphan a
+    // saved selection. Show the orphan instead of dropping it silently — the user
+    // has to be able to see that a profile is still pointing at something gone.
+    selected
+      .filter((token) => !known.has(token.toLowerCase()))
+      .forEach((token) => {
+        chipRow.appendChild(buildIndexerChip(input, {
+          value: token,
+          label: `${token} — no longer configured`,
+          stale: true,
+        }));
+      });
+
+    const emptyHint = configForm.querySelector('[data-newznab-indexer-empty]');
+    if (emptyHint) emptyHint.classList.toggle('hidden', options.length > 0 || selected.length > 0);
+    // Profile mode disables a section's controls while it inherits; chips are
+    // buttons inside that section, so mirror the state onto the ones just built.
+    if (input.disabled) {
+      chipRow.querySelectorAll('.option-chip').forEach((chip) => { chip.disabled = true; });
+    }
   }
 
   function hasNewznabDataForIndex(values, ordinal) {
@@ -948,6 +1050,10 @@
       refreshRowApiKeyLink(row);
     }
     syncNewznabControls();
+    // refreshNewznabFieldNames() above ran before the row's values were applied,
+    // so the chip for this row would still read "Indexer NN" — repaint now that
+    // it has a name.
+    refreshIndexerPicker();
     if (options.autoFocus !== false) {
       const focusTarget = row.querySelector('[data-field="NAME"]') || row.querySelector('input');
       if (focusTarget) focusTarget.focus();
@@ -958,6 +1064,7 @@
   function clearNewznabRows() {
     getNewznabRows().forEach((row) => row.remove());
     syncNewznabControls();
+    refreshIndexerPicker();
   }
 
   function setupNewznabRowsFromValues(values = {}) {
@@ -2306,6 +2413,22 @@
 
   if (addPresetButton) {
     addPresetButton.addEventListener('click', handleAddPresetIndexer);
+  }
+
+  // Keep the Indexer Selection chips in step with the Direct Newznab rows while
+  // they are being edited: renaming a row (or changing its endpoint, which is
+  // where the fallback label comes from) or toggling it off must be reflected
+  // without a page reload. Row add/remove/reorder already routes through
+  // refreshNewznabFieldNames().
+  if (newznabList) {
+    newznabList.addEventListener('input', (event) => {
+      const field = event.target && event.target.dataset ? event.target.dataset.field : '';
+      if (field === 'NAME' || field === 'ENDPOINT') refreshIndexerPicker();
+    });
+    newznabList.addEventListener('change', (event) => {
+      const field = event.target && event.target.dataset ? event.target.dataset.field : '';
+      if (field === 'INDEXER_ENABLED') refreshIndexerPicker();
+    });
   }
 
   if (managerSelect) {

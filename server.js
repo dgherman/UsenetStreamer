@@ -270,6 +270,41 @@ adminApiRouter.get('/config', (req, res) => {
   });
 });
 
+// ── Indexer-selection validation (issue #86) ────────────────────────────────
+// The save paths reject a selection naming an indexer that does not exist — the
+// admin UI can't produce one, but an API client or a hand-edited runtime-env can.
+// Runtime resolution stays deliberately tolerant (it only warns): a row may be
+// legitimately removed long after a profile selected it, and that must not break
+// the search.
+function describeInvalidNewznabSelection(value, configs) {
+  const resolved = newznabService.resolveIndexerSelection(configs, value);
+  const bad = [
+    ...resolved.unmatched,
+    ...resolved.ambiguous.map((entry) => entry.token),
+  ];
+  if (bad.length === 0) return null;
+  const available = configs
+    .map((config) => `${newznabService.canonicalIndexerId(config)} (${config.displayName || config.endpoint})`)
+    .join(', ');
+  return `Unknown Direct Newznab indexer${bad.length > 1 ? 's' : ''}: ${bad.join(', ')}. `
+    + `Available: ${available || 'none configured'}.`;
+}
+
+// The manager's indexer list can't be validated against real indexers — nothing
+// in this addon fetches Prowlarr's/NZBHydra's indexer list. Prowlarr IDs are at
+// least known to be numeric (with -1 = "all Usenet indexers"), so check that
+// much; NZBHydra takes free-form names and is left alone.
+function describeInvalidManagerSelection(value, manager) {
+  if (String(manager || '').trim().toLowerCase() !== 'prowlarr') return null;
+  const bad = String(value || '')
+    .split(',')
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0)
+    .filter((token) => !/^-?\d+$/.test(token));
+  if (bad.length === 0) return null;
+  return `Prowlarr indexer IDs must be numbers (or -1 for all Usenet indexers). Invalid: ${bad.join(', ')}.`;
+}
+
 adminApiRouter.post('/config', async (req, res) => {
   const payload = req.body || {};
   const incoming = payload.values;
@@ -312,6 +347,31 @@ adminApiRouter.post('/config', async (req, res) => {
     const mx = Number(incoming.NZB_MAX_RESULT_SIZE_GB);
     if (Number.isFinite(mn) && Number.isFinite(mx) && mx > 0 && mn > mx) {
       res.status(400).json({ error: `Min result size (${mn} GB) can't be larger than max result size (${mx} GB).` });
+      return;
+    }
+  }
+
+  // Indexer selection (issue #86). Validate against the indexers this very save
+  // is defining, not the ones currently loaded — rows and their selection are
+  // submitted together.
+  if (Object.prototype.hasOwnProperty.call(incoming, 'NEWZNAB_INDEXERS')) {
+    const pendingConfigs = newznabService.getNewznabConfigsFromValues(
+      { ...process.env, ...incoming },
+      { includeEmpty: false },
+    );
+    const selectionError = describeInvalidNewznabSelection(incoming.NEWZNAB_INDEXERS, pendingConfigs);
+    if (selectionError) {
+      res.status(400).json({ error: selectionError });
+      return;
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(incoming, 'INDEXER_MANAGER_INDEXERS')) {
+    const managerError = describeInvalidManagerSelection(
+      incoming.INDEXER_MANAGER_INDEXERS,
+      incoming.INDEXER_MANAGER || process.env.INDEXER_MANAGER,
+    );
+    if (managerError) {
+      res.status(400).json({ error: managerError });
       return;
     }
   }
@@ -528,6 +588,27 @@ adminApiRouter.post('/profiles', (req, res) => {
 
   // Whitelist: only known override suffixes; empty/missing -> null (clear = inherit).
   const incomingOverrides = (body.overrides && typeof body.overrides === 'object') ? body.overrides : {};
+
+  // Don't persist a selection pointing at an indexer that doesn't exist (issue #86).
+  // Validate against every configured row, enabled or not — a temporarily disabled
+  // indexer is still a legitimate choice.
+  const newznabSelectionError = describeInvalidNewznabSelection(
+    incomingOverrides.NEWZNAB_INDEXERS,
+    NEWZNAB_CONFIGS,
+  );
+  if (newznabSelectionError) {
+    res.status(400).json({ error: newznabSelectionError });
+    return;
+  }
+  const managerSelectionError = describeInvalidManagerSelection(
+    incomingOverrides.INDEXER_MANAGER_INDEXERS,
+    INDEXER_MANAGER,
+  );
+  if (managerSelectionError) {
+    res.status(400).json({ error: managerSelectionError });
+    return;
+  }
+
   const updates = { [`NZB_PROFILE_${idx}_NAME`]: rawName };
   Object.keys(profileManager.PROFILE_OVERRIDES).forEach((suffix) => {
     const v = incomingOverrides[suffix];
@@ -1348,6 +1429,38 @@ function executeManagerPlanWithBackoff(plan, skipManager = false, options = {}) 
     });
 }
 
+// The Direct Newznab selection in force for one request: the profile's override
+// when it has one, otherwise the global NEWZNAB_INDEXERS (blank = every row).
+function resolveNewznabSelectionValue(options = {}) {
+  return options.newznabIndexers !== undefined ? options.newznabIndexers : NEWZNAB_INDEXERS;
+}
+
+// A selection that resolves to nothing — or to fewer rows than asked for — is
+// almost always a typo, or a row that was renamed/removed after the selection was
+// saved. Warn at normal level: with debug logging off the search would otherwise
+// just come back empty. Called ONCE per stream request, not per search plan
+// (several plans fire per request and would repeat an identical warning).
+// A blank/default selection has no tokens and stays completely silent.
+function warnOnUncleanNewznabSelection(options = {}) {
+  if (!NEWZNAB_ENABLED) return;
+  const selection = resolveNewznabSelectionValue(options);
+  const resolved = newznabService.resolveIndexerSelection(ACTIVE_NEWZNAB_CONFIGS, selection);
+  if (resolved.tokens.length === 0) return;
+  if (resolved.selected.length > 0 && resolved.unmatched.length === 0 && resolved.ambiguous.length === 0) return;
+  console.warn(`${NEWZNAB_LOG_PREFIX} Indexer selection did not resolve cleanly`, {
+    requested: resolved.tokens,
+    matched: resolved.selected.map((config) => newznabService.canonicalIndexerId(config)),
+    unmatched: resolved.unmatched,
+    // Ambiguous tokens are skipped, not fanned out — fix the selection to use
+    // the canonical IDs listed below.
+    ambiguous: resolved.ambiguous,
+    availableIds: ACTIVE_NEWZNAB_CONFIGS.map((config) => ({
+      id: newznabService.canonicalIndexerId(config),
+      name: config.displayName || config.endpoint,
+    })),
+  });
+}
+
 // `options.newznabIndexers` narrows the direct-Newznab fan-out to the rows a
 // profile selected (issue #86). Undefined => the global NEWZNAB_INDEXERS applies,
 // which is blank by default and means "every enabled row".
@@ -1355,27 +1468,8 @@ function executeNewznabPlan(plan, options = {}) {
   const debugEnabled = isNewznabDebugEnabled();
   const endpointLogEnabled = isNewznabEndpointLoggingEnabled();
   const planSummary = summarizeNewznabPlan(plan);
-  const selection = options.newznabIndexers !== undefined ? options.newznabIndexers : NEWZNAB_INDEXERS;
-  const resolvedSelection = newznabService.resolveIndexerSelection(ACTIVE_NEWZNAB_CONFIGS, selection);
-  const selectedConfigs = resolvedSelection.selected;
-  // A selection that resolves to nothing (or to fewer rows than asked for) is
-  // almost always a typo or a row that was renamed/removed. Warn at normal level
-  // — with debug logging off, the search would otherwise just come back empty.
-  if (NEWZNAB_ENABLED && resolvedSelection.tokens.length > 0
-      && (selectedConfigs.length === 0 || resolvedSelection.unmatched.length > 0 || resolvedSelection.ambiguous.length > 0)) {
-    console.warn(`${NEWZNAB_LOG_PREFIX} Indexer selection did not resolve cleanly`, {
-      requested: resolvedSelection.tokens,
-      matched: selectedConfigs.map((config) => newznabService.canonicalIndexerId(config)),
-      unmatched: resolvedSelection.unmatched,
-      // Ambiguous tokens are skipped, not fanned out — fix the selection to use
-      // the canonical IDs listed below.
-      ambiguous: resolvedSelection.ambiguous,
-      availableIds: ACTIVE_NEWZNAB_CONFIGS.map((config) => ({
-        id: newznabService.canonicalIndexerId(config),
-        name: config.displayName || config.endpoint,
-      })),
-    });
-  }
+  const selection = resolveNewznabSelectionValue(options);
+  const selectedConfigs = newznabService.resolveIndexerSelection(ACTIVE_NEWZNAB_CONFIGS, selection).selected;
   if (!NEWZNAB_ENABLED || selectedConfigs.length === 0) {
     logNewznabDebug('Skipping search plan because direct Newznab is disabled or no configs are available', {
       enabled: NEWZNAB_ENABLED,
@@ -1632,6 +1726,8 @@ async function streamHandler(req, res) {
     indexerManagerIndexers: profileEff ? sortSource.INDEXER_MANAGER_INDEXERS : undefined,
     newznabIndexers: profileEff ? sortSource.NEWZNAB_INDEXERS : undefined,
   };
+  // Warn once per request, not once per search plan.
+  warnOnUncleanNewznabSelection(effIndexerOptions);
   console.log(`[REQUEST] Received request for ${type} ID: ${id}`, { ts: new Date(requestStartTs).toISOString() });
   let triagePrewarmPromise = null;
 
