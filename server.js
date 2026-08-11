@@ -1356,7 +1356,26 @@ function executeNewznabPlan(plan, options = {}) {
   const endpointLogEnabled = isNewznabEndpointLoggingEnabled();
   const planSummary = summarizeNewznabPlan(plan);
   const selection = options.newznabIndexers !== undefined ? options.newznabIndexers : NEWZNAB_INDEXERS;
-  const selectedConfigs = newznabService.selectIndexerConfigs(ACTIVE_NEWZNAB_CONFIGS, selection);
+  const resolvedSelection = newznabService.resolveIndexerSelection(ACTIVE_NEWZNAB_CONFIGS, selection);
+  const selectedConfigs = resolvedSelection.selected;
+  // A selection that resolves to nothing (or to fewer rows than asked for) is
+  // almost always a typo or a row that was renamed/removed. Warn at normal level
+  // — with debug logging off, the search would otherwise just come back empty.
+  if (NEWZNAB_ENABLED && resolvedSelection.tokens.length > 0
+      && (selectedConfigs.length === 0 || resolvedSelection.unmatched.length > 0 || resolvedSelection.ambiguous.length > 0)) {
+    console.warn(`${NEWZNAB_LOG_PREFIX} Indexer selection did not resolve cleanly`, {
+      requested: resolvedSelection.tokens,
+      matched: selectedConfigs.map((config) => newznabService.canonicalIndexerId(config)),
+      unmatched: resolvedSelection.unmatched,
+      // Ambiguous tokens are skipped, not fanned out — fix the selection to use
+      // the canonical IDs listed below.
+      ambiguous: resolvedSelection.ambiguous,
+      availableIds: ACTIVE_NEWZNAB_CONFIGS.map((config) => ({
+        id: newznabService.canonicalIndexerId(config),
+        name: config.displayName || config.endpoint,
+      })),
+    });
+  }
   if (!NEWZNAB_ENABLED || selectedConfigs.length === 0) {
     logNewznabDebug('Skipping search plan because direct Newznab is disabled or no configs are available', {
       enabled: NEWZNAB_ENABLED,

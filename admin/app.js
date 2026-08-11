@@ -705,7 +705,10 @@
     row.dataset.index = key;
     const labelEl = row.querySelector('[data-row-label]');
     if (labelEl) {
-      labelEl.textContent = `Indexer ${ordinal}`;
+      // Show the zero-padded slot key rather than the bare ordinal: it is the
+      // canonical ID the "Direct Newznab Indexers" selection field matches on
+      // (and the <NN> in this row's NEWZNAB_*_<NN> keys), so it must be visible.
+      labelEl.textContent = `Indexer ${key}`;
     }
     row.querySelectorAll('[data-field]').forEach((input) => {
       const suffix = input.dataset.field;

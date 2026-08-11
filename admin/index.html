@@ -199,8 +199,8 @@
               <span class="field-hint">Comma-separated list of manager indexers this addon may query. Prowlarr: numeric IDs, with -1 meaning “all Usenet indexers”. NZBHydra: type the indexer names exactly as shown in Hydra.</span>
             </label>
             <label class="align-2line">Direct Newznab Indexers
-              <input name="NEWZNAB_INDEXERS" type="text" placeholder="nzbgeek,drunkenslug" />
-              <span class="field-hint">Comma-separated names of the Direct Newznab rows above to query. Empty = all enabled rows.</span>
+              <input name="NEWZNAB_INDEXERS" type="text" placeholder="01,03" />
+              <span class="field-hint">Comma-separated IDs of the Direct Newznab rows above to query — use the ID printed on each row (“Indexer 01”, “Indexer 02”, …). Empty = all enabled rows. These IDs follow row position, so reordering or removing a row shifts them.</span>
             </label>
           </div>
         </section>

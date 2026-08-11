@@ -563,27 +563,93 @@ function filterUsableConfigs(configs = [], { requireEnabled = true, requireApiKe
   });
 }
 
+// The canonical identifier of a Direct Newznab indexer is its zero-padded slot
+// ID ("01".."20") — the same <NN> that names its NEWZNAB_*_<NN> keys and that the
+// admin UI prints on each row. It is unique by construction, which the other
+// fields are not: two rows may share a display name, and a row may be *named*
+// "2" while a different row sits in slot 02.
+function canonicalIndexerId(config) {
+  if (!config) return '';
+  if (config.id !== undefined && config.id !== null && String(config.id) !== '') return String(config.id);
+  if (Number.isFinite(Number(config.ordinal))) return String(config.ordinal).padStart(2, '0');
+  return '';
+}
+
+// Alias namespaces, tried in precedence order after the canonical ID. Each is
+// resolved on its own: the first namespace that matches at all decides the token,
+// so an alias can never reach past a canonical hit.
+const INDEXER_ALIAS_NAMESPACES = [
+  (config) => [config.slug, config.dedupeKey],
+  (config) => [config.displayName, config.name],
+];
+
+/**
+ * Resolve a comma-separated Direct Newznab selection against a set of configs.
+ *
+ * A token is matched against the canonical slot ID first (a bare number is
+ * zero-padded, so "3" and "03" both mean slot 03), then against slug/dedupeKey,
+ * then against display/configured name. Resolution stops at the first namespace
+ * that yields any match. A token matching two or more rows *within* that
+ * namespace is ambiguous and is reported as an error instead of quietly
+ * selecting every match — selecting N indexers must query exactly those N.
+ *
+ * Returns { selected, tokens, unmatched, ambiguous }. A blank/absent selection
+ * means "no narrowing at all": every config is returned.
+ */
+function resolveIndexerSelection(configs = [], selection) {
+  const list = Array.isArray(configs) ? configs.filter(Boolean) : [];
+  const tokens = String(selection || '')
+    .split(',')
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+  if (tokens.length === 0) {
+    return { selected: list, tokens: [], unmatched: [], ambiguous: [] };
+  }
+
+  const unmatched = [];
+  const ambiguous = [];
+  const picked = new Set();
+
+  const matchesIn = (candidatesOf, target) => list.filter((config) => (candidatesOf(config) || [])
+    .filter((value) => value !== undefined && value !== null && String(value) !== '')
+    .some((value) => String(value).toLowerCase() === target));
+
+  tokens.forEach((token) => {
+    const target = token.toLowerCase();
+    const canonicalTarget = /^\d+$/.test(target) ? target.padStart(2, '0') : target;
+    let matches = list.filter((config) => canonicalIndexerId(config).toLowerCase() === canonicalTarget);
+    if (matches.length === 0) {
+      for (const candidatesOf of INDEXER_ALIAS_NAMESPACES) {
+        matches = matchesIn(candidatesOf, target);
+        if (matches.length > 0) break;
+      }
+    }
+    if (matches.length === 0) {
+      unmatched.push(token);
+      return;
+    }
+    if (matches.length > 1) {
+      ambiguous.push({ token, matches: matches.map((config) => canonicalIndexerId(config)) });
+      return;
+    }
+    picked.add(matches[0]);
+  });
+
+  return {
+    selected: list.filter((config) => picked.has(config)),
+    tokens,
+    unmatched,
+    ambiguous,
+  };
+}
+
 /**
  * Narrow a set of Direct Newznab configs down to an explicit selection.
- * `selection` is a comma-separated list of indexer identifiers — the slot key
- * ("01"), its ordinal ("1"), slug/dedupeKey, display name or configured name.
- * A blank/absent selection means "no narrowing at all" and returns the configs
- * unchanged, which is the behaviour of every config that never sets one.
+ * Thin wrapper over resolveIndexerSelection for callers that only need the
+ * resulting configs. A blank/absent selection returns them unchanged.
  */
 function selectIndexerConfigs(configs = [], selection) {
-  const wanted = new Set(
-    String(selection || '')
-      .split(',')
-      .map((token) => token.trim().toLowerCase())
-      .filter((token) => token.length > 0)
-  );
-  if (wanted.size === 0) return configs;
-  return configs.filter((config) => {
-    if (!config) return false;
-    return [config.id, config.ordinal, config.dedupeKey, config.slug, config.displayName, config.name]
-      .filter((value) => value !== undefined && value !== null && value !== '')
-      .some((value) => wanted.has(String(value).toLowerCase()));
-  });
+  return resolveIndexerSelection(configs, selection).selected;
 }
 
 /**
@@ -1160,6 +1226,8 @@ module.exports = {
   getNewznabConfigsFromValues,
   filterUsableConfigs,
   selectIndexerConfigs,
+  resolveIndexerSelection,
+  canonicalIndexerId,
   getDownloadUserAgentForIndexer,
   getProxyForIndexer,
   searchNewznabIndexers,
