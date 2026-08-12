@@ -263,6 +263,12 @@
       }
     });
     payload.NEWZNAB_ENABLED = hasEnabledNewznabRows() ? 'true' : 'false';
+    // Row controls renumber the picker immediately, so this submitted value is
+    // in the post-mutation slot space. The server uses this transient marker to
+    // distinguish it from an unmarked direct-API selection in old slot space.
+    if (Object.prototype.hasOwnProperty.call(payload, 'NEWZNAB_INDEXERS')) {
+      payload.NEWZNAB_INDEXERS_COORDINATE = 'new';
+    }
     return payload;
   }
 
@@ -717,9 +723,10 @@
     });
   }
 
-  function refreshNewznabFieldNames() {
+  function refreshNewznabFieldNames(previousOptions = null) {
     const rows = getNewznabRows();
     rows.forEach((row, idx) => assignRowFieldNames(row, idx + 1));
+    if (previousOptions) migratePickerSelection(previousOptions, newznabIndexerOptions());
     refreshIndexerPicker();
   }
 
@@ -752,9 +759,34 @@
           id: row.dataset.index || '',
           name: newznabRowDisplayName(row),
           enabled: !enabledToggle || enabledToggle.checked,
+          // Endpoint + API key identifies the selected remote account. Labels
+          // and enabled state are deliberately mutable and must not alter it.
+          identity: JSON.stringify([
+            ((row.querySelector('[data-field="ENDPOINT"]') || {}).value || '').trim(),
+            ((row.querySelector('[data-field="API_KEY"]') || {}).value || '').trim(),
+          ]),
         };
       })
       .filter((option) => option.id);
+  }
+
+  function migratePickerSelection(previousOptions, nextOptions) {
+    const input = configForm && configForm.querySelector('input[name="NEWZNAB_INDEXERS"]');
+    if (!input) return;
+    const migrated = [];
+    parseCommaInput(input.value).forEach((token) => {
+      if (/^stale:\d{2}$/.test(token)) {
+        if (!migrated.includes(token)) migrated.push(token);
+        return;
+      }
+      const old = previousOptions.filter((option) => option.id === token);
+      const matches = old.length === 1
+        ? nextOptions.filter((option) => option.identity === old[0].identity)
+        : [];
+      const value = matches.length === 1 ? matches[0].id : `stale:${token}`;
+      if (!migrated.includes(value)) migrated.push(value);
+    });
+    input.value = migrated.join(',');
   }
 
   function buildIndexerChip(input, { value, label, id, stale, disabledRow }) {
@@ -876,20 +908,22 @@
     if (index === -1) return;
     const targetIndex = index + direction;
     if (targetIndex < 0 || targetIndex >= rows.length) return;
+    const previousOptions = newznabIndexerOptions();
     if (direction < 0) {
       newznabList.insertBefore(row, rows[targetIndex]);
     } else {
       const reference = rows[targetIndex].nextSibling;
       newznabList.insertBefore(row, reference);
     }
-    refreshNewznabFieldNames();
+    refreshNewznabFieldNames(previousOptions);
     syncNewznabControls();
   }
 
   function removeNewznabRow(row) {
     if (!row) return;
+    const previousOptions = newznabIndexerOptions();
     row.remove();
-    refreshNewznabFieldNames();
+    refreshNewznabFieldNames(previousOptions);
     syncNewznabControls();
   }
 

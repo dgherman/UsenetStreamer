@@ -363,17 +363,61 @@ adminApiRouter.post('/config', async (req, res) => {
     }
   }
 
-  // Indexer selection (issue #86). Validate against the indexers this very save
-  // is defining, not the ones currently loaded — rows and their selection are
-  // submitted together.
+  // Indexer selection (issue #86). Browser selections carry an explicit
+  // coordinate-space marker: its chip picker has already renumbered rows, so
+  // that value is in the submitted/new slot space. An API client without the
+  // marker is treated as referring to the persisted/old slot space and is
+  // migrated below. This keeps deletion safe in both clients.
+  const previousNewznabConfigs = newznabService.getEnvNewznabConfigs({ includeEmpty: false });
+  const pendingNewznabConfigs = newznabService.getNewznabConfigsFromValues(
+    pendingNewznabValues(incoming),
+    { includeEmpty: false },
+  );
+  const submittedGlobalSelection = Object.prototype.hasOwnProperty.call(incoming, 'NEWZNAB_INDEXERS');
+  const submittedSelectionIsNewSpace = incoming.NEWZNAB_INDEXERS_COORDINATE === 'new';
   if (Object.prototype.hasOwnProperty.call(incoming, 'NEWZNAB_INDEXERS')) {
-    const pendingConfigs = newznabService.getNewznabConfigsFromValues(pendingNewznabValues(incoming), { includeEmpty: false });
-    const selection = normalizeNewznabSelectionForWrite(incoming.NEWZNAB_INDEXERS, pendingConfigs);
-    if (selection.error) {
-      res.status(400).json({ error: selection.error });
-      return;
+    const newSpace = normalizeNewznabSelectionForWrite(incoming.NEWZNAB_INDEXERS, pendingNewznabConfigs);
+    if (submittedSelectionIsNewSpace || previousNewznabConfigs.length === 0) {
+      if (newSpace.error) {
+        res.status(400).json({ error: newSpace.error });
+        return;
+      }
+      incoming.NEWZNAB_INDEXERS = newSpace.value;
+    } else {
+      const oldSpace = normalizeNewznabSelectionForWrite(incoming.NEWZNAB_INDEXERS, previousNewznabConfigs);
+      if (oldSpace.error && newSpace.error) {
+        res.status(400).json({ error: newSpace.error });
+        return;
+      }
+      if (oldSpace.error) {
+        // It could only have meant a newly created slot, so this is safe.
+        incoming.NEWZNAB_INDEXERS = newSpace.value;
+      } else if (newSpace.error) {
+        // A legacy/direct delete leaves this value solely in old space.
+        incoming.NEWZNAB_INDEXERS = newznabService.migrateIndexerSelection(
+          previousNewznabConfigs,
+          pendingNewznabConfigs,
+          oldSpace.value,
+        );
+      } else {
+        const migratedOldSpace = newznabService.migrateIndexerSelection(
+          previousNewznabConfigs,
+          pendingNewznabConfigs,
+          oldSpace.value,
+        );
+        if (migratedOldSpace === newSpace.value) {
+          incoming.NEWZNAB_INDEXERS = newSpace.value;
+        } else {
+          // An unmarked API token valid in both spaces is unknowable. Persist a
+          // visible stale marker rather than choosing either indexer silently.
+          incoming.NEWZNAB_INDEXERS = oldSpace.value.split(',').map((token) => (
+            newznabService.isStaleIndexerSelectionToken(token)
+              ? token
+              : newznabService.staleIndexerSelectionToken(token)
+          )).join(',');
+        }
+      }
     }
-    incoming.NEWZNAB_INDEXERS = selection.value;
   }
   if (Object.prototype.hasOwnProperty.call(incoming, 'INDEXER_MANAGER_INDEXERS')) {
     const managerError = describeInvalidManagerSelection(
@@ -488,17 +532,17 @@ adminApiRouter.post('/config', async (req, res) => {
   // are not open in the dashboard. Exact row identity is required; if an old
   // row cannot be identified in the submitted set, retain a visible stale token
   // instead of silently retargeting it to the row now occupying that slot.
-  const previousNewznabConfigs = newznabService.getEnvNewznabConfigs({ includeEmpty: false });
-  const nextNewznabConfigs = newznabService.getNewznabConfigsFromValues(pendingNewznabValues(incoming), { includeEmpty: false });
   const migrateSelection = (selection) => newznabService.migrateIndexerSelection(
     previousNewznabConfigs,
-    nextNewznabConfigs,
+    pendingNewznabConfigs,
     selection,
   );
-  const globalSelection = Object.prototype.hasOwnProperty.call(incoming, 'NEWZNAB_INDEXERS')
-    ? incoming.NEWZNAB_INDEXERS
-    : process.env.NEWZNAB_INDEXERS;
-  if (String(globalSelection || '').trim()) updates.NEWZNAB_INDEXERS = migrateSelection(globalSelection);
+  // Only an omitted global value is in old/persisted coordinates. A submitted
+  // browser value was normalized above in new coordinates and must never be
+  // fed back through old-space migration.
+  if (!submittedGlobalSelection && String(process.env.NEWZNAB_INDEXERS || '').trim()) {
+    updates.NEWZNAB_INDEXERS = migrateSelection(process.env.NEWZNAB_INDEXERS);
+  }
   for (let i = 1; i <= profileManager.MAX_PROFILES; i += 1) {
     const slot = String(i).padStart(2, '0');
     const key = `NZB_PROFILE_${slot}_NEWZNAB_INDEXERS`;

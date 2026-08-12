@@ -576,19 +576,21 @@ function canonicalIndexerId(config) {
 }
 
 // A row's slot is deliberately excluded: slots are positional and can change
-// when the dashboard removes or reorders rows.  This is used only while saving
-// configuration to find the same row after that positional rewrite.
+// when the dashboard removes or reorders rows. Endpoint + API key identifies
+// the remote indexer/account the user selected. Names and every operational UI
+// setting are intentionally excluded: renaming or disabling a row must not
+// orphan its selection.
 function indexerIdentity(config) {
   if (!config) return '';
-  return JSON.stringify([
-    config.endpoint, config.apiKey, config.apiPath, config.name, config.enabled,
-    config.isPaid, config.paidLimit, config.zyclopsEnabled, config.searchUserAgent,
-    config.downloadUserAgent, config.proxy,
-  ]);
+  return JSON.stringify([config.endpoint, config.apiKey]);
 }
 
 function staleIndexerSelectionToken(id) {
   return `stale:${id}`;
+}
+
+function isStaleIndexerSelectionToken(token) {
+  return /^stale:\d{2}$/.test(String(token || ''));
 }
 
 // Strict counterpart to resolveIndexerSelection(). This is for persistence only:
@@ -600,6 +602,13 @@ function normalizeCanonicalIndexerSelection(configs = [], selection) {
   const normalized = [];
   const invalid = [];
   String(selection || '').split(',').map((token) => token.trim()).filter(Boolean).forEach((token) => {
+    // A stale marker is an explicit, system-generated exception to canonical
+    // IDs. It must survive unrelated dashboard saves so its dashed chip remains
+    // actionable; aliases and arbitrary unknown text are still rejected.
+    if (isStaleIndexerSelectionToken(token)) {
+      if (!normalized.includes(token)) normalized.push(token);
+      return;
+    }
     const id = /^\d+$/.test(token) ? token.padStart(2, '0') : '';
     if (!id || !available.has(id)) {
       invalid.push(token);
@@ -621,7 +630,7 @@ function migrateIndexerSelection(previousConfigs = [], nextConfigs = [], selecti
     if (value && !migrated.includes(value)) migrated.push(value);
   };
   tokens.forEach((token) => {
-    if (token.startsWith('stale:')) {
+    if (isStaleIndexerSelectionToken(token)) {
       add(token);
       return;
     }
@@ -1293,6 +1302,7 @@ module.exports = {
   normalizeCanonicalIndexerSelection,
   migrateIndexerSelection,
   staleIndexerSelectionToken,
+  isStaleIndexerSelectionToken,
   getDownloadUserAgentForIndexer,
   getProxyForIndexer,
   searchNewznabIndexers,
