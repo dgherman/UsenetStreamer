@@ -575,6 +575,68 @@ function canonicalIndexerId(config) {
   return '';
 }
 
+// A row's slot is deliberately excluded: slots are positional and can change
+// when the dashboard removes or reorders rows.  This is used only while saving
+// configuration to find the same row after that positional rewrite.
+function indexerIdentity(config) {
+  if (!config) return '';
+  return JSON.stringify([
+    config.endpoint, config.apiKey, config.apiPath, config.name, config.enabled,
+    config.isPaid, config.paidLimit, config.zyclopsEnabled, config.searchUserAgent,
+    config.downloadUserAgent, config.proxy,
+  ]);
+}
+
+function staleIndexerSelectionToken(id) {
+  return `stale:${id}`;
+}
+
+// Strict counterpart to resolveIndexerSelection(). This is for persistence only:
+// aliases are a read-compatibility convenience, never a storage format.
+function normalizeCanonicalIndexerSelection(configs = [], selection) {
+  const available = new Set((Array.isArray(configs) ? configs : [])
+    .filter(Boolean)
+    .map((config) => canonicalIndexerId(config)));
+  const normalized = [];
+  const invalid = [];
+  String(selection || '').split(',').map((token) => token.trim()).filter(Boolean).forEach((token) => {
+    const id = /^\d+$/.test(token) ? token.padStart(2, '0') : '';
+    if (!id || !available.has(id)) {
+      invalid.push(token);
+    } else if (!normalized.includes(id)) {
+      normalized.push(id);
+    }
+  });
+  return { value: normalized.join(','), invalid };
+}
+
+// Migrate selections through a positional row mutation.  A match must be
+// unique and exact; an edited/replaced or duplicate row is deliberately made
+// stale instead of risking a request to an indexer the user did not choose.
+function migrateIndexerSelection(previousConfigs = [], nextConfigs = [], selection) {
+  const tokens = String(selection || '').split(',').map((token) => token.trim()).filter(Boolean);
+  if (tokens.length === 0) return '';
+  const migrated = [];
+  const add = (value) => {
+    if (value && !migrated.includes(value)) migrated.push(value);
+  };
+  tokens.forEach((token) => {
+    if (token.startsWith('stale:')) {
+      add(token);
+      return;
+    }
+    const resolved = resolveIndexerSelection(previousConfigs, token);
+    if (resolved.selected.length !== 1 || resolved.unmatched.length || resolved.ambiguous.length) {
+      add(staleIndexerSelectionToken(token));
+      return;
+    }
+    const oldConfig = resolved.selected[0];
+    const matches = nextConfigs.filter((config) => indexerIdentity(config) === indexerIdentity(oldConfig));
+    add(matches.length === 1 ? canonicalIndexerId(matches[0]) : staleIndexerSelectionToken(canonicalIndexerId(oldConfig)));
+  });
+  return migrated.join(',');
+}
+
 // Alias namespaces, tried in precedence order after the canonical ID. Each is
 // resolved on its own: the first namespace that matches at all decides the token,
 // so an alias can never reach past a canonical hit.
@@ -1228,6 +1290,9 @@ module.exports = {
   selectIndexerConfigs,
   resolveIndexerSelection,
   canonicalIndexerId,
+  normalizeCanonicalIndexerSelection,
+  migrateIndexerSelection,
+  staleIndexerSelectionToken,
   getDownloadUserAgentForIndexer,
   getProxyForIndexer,
   searchNewznabIndexers,

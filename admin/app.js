@@ -808,9 +808,10 @@
     selected
       .filter((token) => !known.has(token.toLowerCase()))
       .forEach((token) => {
+        const staleId = token.startsWith('stale:') ? token.slice('stale:'.length) : token;
         chipRow.appendChild(buildIndexerChip(input, {
           value: token,
-          label: `${token} — no longer configured`,
+          label: `${staleId} — no longer configured`,
           stale: true,
         }));
       });

@@ -271,23 +271,35 @@ adminApiRouter.get('/config', (req, res) => {
 });
 
 // ── Indexer-selection validation (issue #86) ────────────────────────────────
-// The save paths reject a selection naming an indexer that does not exist — the
-// admin UI can't produce one, but an API client or a hand-edited runtime-env can.
-// Runtime resolution stays deliberately tolerant (it only warns): a row may be
-// legitimately removed long after a profile selected it, and that must not break
-// the search.
-function describeInvalidNewznabSelection(value, configs) {
-  const resolved = newznabService.resolveIndexerSelection(configs, value);
-  const bad = [
-    ...resolved.unmatched,
-    ...resolved.ambiguous.map((entry) => entry.token),
-  ];
-  if (bad.length === 0) return null;
+// Writes intentionally accept only the canonical positional ID. Runtime reads
+// remain tolerant so a stale selection can be shown and warned about rather
+// than bricking a profile after an indexer row is removed.
+function normalizeNewznabSelectionForWrite(value, configs) {
+  const strict = newznabService.normalizeCanonicalIndexerSelection(configs, value);
+  if (strict.invalid.length === 0) return { value: strict.value, error: null };
   const available = configs
     .map((config) => `${newznabService.canonicalIndexerId(config)} (${config.displayName || config.endpoint})`)
     .join(', ');
-  return `Unknown Direct Newznab indexer${bad.length > 1 ? 's' : ''}: ${bad.join(', ')}. `
-    + `Available: ${available || 'none configured'}.`;
+  return {
+    value: null,
+    error: `Unknown Direct Newznab indexer${strict.invalid.length > 1 ? 's' : ''}: ${strict.invalid.join(', ')}. `
+      + `Available: ${available || 'none configured'}.`,
+  };
+}
+
+function pendingNewznabValues(incoming) {
+  const values = { ...process.env };
+  NEWZNAB_NUMBERED_KEYS.forEach((key) => {
+    delete values[key]; // config POST replaces the complete numbered-row set
+    if (!Object.prototype.hasOwnProperty.call(incoming, key)) return;
+    const value = incoming[key];
+    if (value === CREDENTIAL_MASK_SENTINEL) {
+      if (process.env[key] !== undefined) values[key] = process.env[key];
+    } else if (value !== '' && value !== null && value !== undefined) {
+      values[key] = typeof value === 'boolean' ? (value ? 'true' : 'false') : String(value);
+    }
+  });
+  return values;
 }
 
 // The manager's indexer list can't be validated against real indexers — nothing
@@ -355,15 +367,13 @@ adminApiRouter.post('/config', async (req, res) => {
   // is defining, not the ones currently loaded — rows and their selection are
   // submitted together.
   if (Object.prototype.hasOwnProperty.call(incoming, 'NEWZNAB_INDEXERS')) {
-    const pendingConfigs = newznabService.getNewznabConfigsFromValues(
-      { ...process.env, ...incoming },
-      { includeEmpty: false },
-    );
-    const selectionError = describeInvalidNewznabSelection(incoming.NEWZNAB_INDEXERS, pendingConfigs);
-    if (selectionError) {
-      res.status(400).json({ error: selectionError });
+    const pendingConfigs = newznabService.getNewznabConfigsFromValues(pendingNewznabValues(incoming), { includeEmpty: false });
+    const selection = normalizeNewznabSelectionForWrite(incoming.NEWZNAB_INDEXERS, pendingConfigs);
+    if (selection.error) {
+      res.status(400).json({ error: selection.error });
       return;
     }
+    incoming.NEWZNAB_INDEXERS = selection.value;
   }
   if (Object.prototype.hasOwnProperty.call(incoming, 'INDEXER_MANAGER_INDEXERS')) {
     const managerError = describeInvalidManagerSelection(
@@ -471,6 +481,28 @@ adminApiRouter.post('/config', async (req, res) => {
   }
   if (Object.prototype.hasOwnProperty.call(incoming, 'TMDB_SEARCH_MODE')) {
     updates.TMDB_SEARCH_MODE = incoming.TMDB_SEARCH_MODE ? String(incoming.TMDB_SEARCH_MODE) : null;
+  }
+
+  // NEWZNAB_<FIELD>_<NN> is positional. A delete/reorder therefore has to
+  // migrate every persisted global/profile selection, including profiles that
+  // are not open in the dashboard. Exact row identity is required; if an old
+  // row cannot be identified in the submitted set, retain a visible stale token
+  // instead of silently retargeting it to the row now occupying that slot.
+  const previousNewznabConfigs = newznabService.getEnvNewznabConfigs({ includeEmpty: false });
+  const nextNewznabConfigs = newznabService.getNewznabConfigsFromValues(pendingNewznabValues(incoming), { includeEmpty: false });
+  const migrateSelection = (selection) => newznabService.migrateIndexerSelection(
+    previousNewznabConfigs,
+    nextNewznabConfigs,
+    selection,
+  );
+  const globalSelection = Object.prototype.hasOwnProperty.call(incoming, 'NEWZNAB_INDEXERS')
+    ? incoming.NEWZNAB_INDEXERS
+    : process.env.NEWZNAB_INDEXERS;
+  if (String(globalSelection || '').trim()) updates.NEWZNAB_INDEXERS = migrateSelection(globalSelection);
+  for (let i = 1; i <= profileManager.MAX_PROFILES; i += 1) {
+    const slot = String(i).padStart(2, '0');
+    const key = `NZB_PROFILE_${slot}_NEWZNAB_INDEXERS`;
+    if (String(process.env[key] || '').trim()) updates[key] = migrateSelection(process.env[key]);
   }
 
   // Debug: log what we're about to save
@@ -592,12 +624,12 @@ adminApiRouter.post('/profiles', (req, res) => {
   // Don't persist a selection pointing at an indexer that doesn't exist (issue #86).
   // Validate against every configured row, enabled or not — a temporarily disabled
   // indexer is still a legitimate choice.
-  const newznabSelectionError = describeInvalidNewznabSelection(
+  const newznabSelection = normalizeNewznabSelectionForWrite(
     incomingOverrides.NEWZNAB_INDEXERS,
     NEWZNAB_CONFIGS,
   );
-  if (newznabSelectionError) {
-    res.status(400).json({ error: newznabSelectionError });
+  if (newznabSelection.error) {
+    res.status(400).json({ error: newznabSelection.error });
     return;
   }
   const managerSelectionError = describeInvalidManagerSelection(
@@ -611,7 +643,7 @@ adminApiRouter.post('/profiles', (req, res) => {
 
   const updates = { [`NZB_PROFILE_${idx}_NAME`]: rawName };
   Object.keys(profileManager.PROFILE_OVERRIDES).forEach((suffix) => {
-    const v = incomingOverrides[suffix];
+    const v = suffix === 'NEWZNAB_INDEXERS' ? newznabSelection.value : incomingOverrides[suffix];
     const trimmed = typeof v === 'string' ? v.trim() : v;
     updates[`NZB_PROFILE_${idx}_${suffix}`] = (trimmed === '' || trimmed === null || trimmed === undefined) ? null : String(trimmed);
   });
